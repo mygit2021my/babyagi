@@ -24,7 +24,8 @@ web_up() {
 }
 
 tunnel_up() {
-  pgrep -f 'cloudflared tunnel' >/dev/null 2>&1
+  pgrep -f 'cloudflared tunnel' >/dev/null 2>&1 && return 0
+  pgrep -f '/frpc -c' >/dev/null 2>&1
 }
 
 alive() {
@@ -47,7 +48,7 @@ publish_url() {
   local fixed="" url=""
   if [ -s "$ROOT/data/fixed-url.txt" ]; then
     fixed="$(tr -d '[:space:]' <"$ROOT/data/fixed-url.txt")"
-    if [[ "$fixed" == https://* ]]; then
+    if [[ "$fixed" =~ ^https?://[A-Za-z0-9.:_-]+$ ]]; then
       printf '%s\n' "$fixed" >"$ROOT/data/public-url.txt"
       return 0
     fi

@@ -81,7 +81,8 @@ public class LoginActivity extends AppCompatActivity {
     private void storeSession(String token, Runnable onFailure) {
         CookieManager cookies = CookieManager.getInstance();
         cookies.setAcceptCookie(true);
-        String value = "gate_session=" + token + "; Path=/; Secure; SameSite=Lax; Max-Age=604800";
+        String secure = baseUrl(this).startsWith("https://") ? "; Secure" : "";
+        String value = "gate_session=" + token + "; Path=/; SameSite=Lax; Max-Age=604800" + secure;
         cookies.setCookie(baseUrl(this), value, success -> {
             if (!Boolean.TRUE.equals(success)) {
                 runOnUiThread(() -> {

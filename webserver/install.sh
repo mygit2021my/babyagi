@@ -15,6 +15,19 @@ fi
 
 python3 -m pip install --user 'websocket-client==1.9.2'
 
+if [ ! -x /usr/local/bin/frpc ]; then
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64) frp_arch=amd64 ;;
+    aarch64) frp_arch=arm64 ;;
+    *) echo "unsupported architecture for frp: $arch" >&2; exit 1 ;;
+  esac
+  curl -fsSL -o /tmp/frp.tgz \
+    "https://github.com/fatedier/frp/releases/download/v0.71.1/frp_0.71.1_linux_${frp_arch}.tar.gz"
+  tar -C /tmp -xzf /tmp/frp.tgz
+  sudo install -m 755 "/tmp/frp_0.71.1_linux_${frp_arch}/frpc" /usr/local/bin/frpc
+fi
+
 if [ -d /run/systemd/system ]; then
   sudo cp "$ROOT/systemd/gate-web.service" /etc/systemd/system/gate-web.service
   sudo cp "$ROOT/systemd/gate-tunnel.service" /etc/systemd/system/gate-tunnel.service

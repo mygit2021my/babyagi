@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# Keep a public HTTPS address pointed at the local web service.
+# Publish the local web service.
 #
-# Without extra files this is a Cloudflare Quick Tunnel. Its trycloudflare.com
-# name is new every time this process starts, and that name cannot be reserved.
+# Stable address, no domain required: a cloud server with a fixed public IP.
+#   webserver/data/vps.conf    written by use-vps.sh, not committed
+# The cloud server runs webserver/vps/setup-frps.sh. This machine connects out
+# to it, and visitors use http://that-ip .
 #
-# A stable name needs a Cloudflare named tunnel on a domain you control:
-#   webserver/data/tunnel.token    one line, the tunnel token from the dashboard
-#   webserver/data/fixed-url.txt   one line, https://your.domain
-# Both files stay out of git. Restarting cloudflared then keeps the same address.
+# Otherwise this is a Cloudflare Quick Tunnel. That trycloudflare.com name
+# changes every time the process starts and cannot be reserved.
+# A Cloudflare named tunnel still works if these gitignored files exist:
+#   webserver/data/tunnel.token
+#   webserver/data/fixed-url.txt
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p "$ROOT/data"
@@ -15,16 +18,65 @@ LOG="$ROOT/data/cloudflared.log"
 URL_FILE="$ROOT/data/public-url.txt"
 TOKEN_FILE="$ROOT/data/tunnel.token"
 FIXED_FILE="$ROOT/data/fixed-url.txt"
+VPS_CONF="$ROOT/data/vps.conf"
+FRPC_CONF="$ROOT/data/frpc.toml"
+
+exec 8>>"$ROOT/data/tunnel.lock"
+if ! flock -n 8; then
+  exit 0
+fi
+
+valid_url() {
+  [[ "$1" =~ ^https?://[A-Za-z0-9.:_-]+$ ]]
+}
 
 write_fixed_url() {
   [ -s "$FIXED_FILE" ] || return 1
   local fixed
   fixed="$(tr -d '[:space:]' <"$FIXED_FILE")"
-  [[ "$fixed" == https://* ]] || return 1
+  valid_url "$fixed" || return 1
   printf '%s\n' "$fixed" >"$URL_FILE"
 }
 
-if [ -s "$TOKEN_FILE" ]; then
+start_frpc() {
+  # shellcheck disable=SC1090
+  source "$VPS_CONF"
+  : "${VPS_IP:?}"
+  : "${VPS_PORT:?}"
+  : "${FRP_SERVER_PORT:?}"
+  : "${FRP_TOKEN:?}"
+  local frpc="${FRPC:-frpc}"
+  if ! command -v "$frpc" >/dev/null 2>&1; then
+    echo "frpc is not installed" >>"$LOG"
+    exit 1
+  fi
+  umask 077
+  cat >"$FRPC_CONF" <<EOF
+serverAddr = "$VPS_IP"
+serverPort = $FRP_SERVER_PORT
+auth.method = "token"
+auth.token = "$FRP_TOKEN"
+loginFailExit = false
+
+[[proxies]]
+name = "gate"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8080
+remotePort = $VPS_PORT
+EOF
+  if [ "$VPS_PORT" = "80" ]; then
+    printf 'http://%s\n' "$VPS_IP" >"$FIXED_FILE"
+  else
+    printf 'http://%s:%s\n' "$VPS_IP" "$VPS_PORT" >"$FIXED_FILE"
+  fi
+  write_fixed_url || true
+  "$frpc" -c "$FRPC_CONF" >>"$LOG" 2>&1 &
+}
+
+if [ -s "$VPS_CONF" ]; then
+  start_frpc
+elif [ -s "$TOKEN_FILE" ]; then
   write_fixed_url || true
   cloudflared tunnel --no-autoupdate --protocol http2 run --token-file "$TOKEN_FILE" >>"$LOG" 2>&1 &
 else
