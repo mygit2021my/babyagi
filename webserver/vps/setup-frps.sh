@@ -1,26 +1,17 @@
 #!/usr/bin/env bash
-# Run this on the cloud server that has a fixed public IP.
-# It listens on that IP and forwards one port to the sandbox.
+# Offline installer for a cloud server that cannot reach the public internet.
+# Put this script in the same directory as the frp archives, then:
+#   sudo bash setup-frps.sh
 set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
 
 say() {
   printf '%s\n' "$*"
 }
 
-say "开始安装固定入口"
+say "开始安装固定入口（不访问外网）"
 
 if [ "$(id -u)" -ne 0 ]; then
   say "请用 root 运行: sudo bash setup-frps.sh"
-  exit 1
-fi
-
-if ! command -v curl >/dev/null 2>&1; then
-  say "缺少 curl，请先安装: apt-get install -y curl ca-certificates"
-  exit 1
-fi
-if ! command -v openssl >/dev/null 2>&1; then
-  say "缺少 openssl，请先安装: apt-get install -y openssl"
   exit 1
 fi
 
@@ -32,31 +23,44 @@ case "$arch" in
 esac
 
 ver=0.71.1
-if [ ! -x /usr/local/bin/frps ]; then
-  name="frp_${ver}_linux_${frp_arch}.tar.gz"
-  url="https://github.com/fatedier/frp/releases/download/v${ver}/${name}"
-  say "正在从 GitHub 下载 ${name}。若这里停很久，说明这台机器访问 GitHub 不通。"
-  rm -f /tmp/frp.tgz
-  if ! curl -fL --connect-timeout 20 --max-time 180 --retry 2 --retry-delay 2 -o /tmp/frp.tgz "$url"; then
-    say "GitHub 下载失败。请在这台机器上执行: curl -I --max-time 20 ${url}"
-    exit 1
+name="frp_${ver}_linux_${frp_arch}.tar.gz"
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+archive=""
+for candidate in "$script_dir/$name" "$script_dir/offline/$name"; do
+  if [ -f "$candidate" ]; then
+    archive="$candidate"
+    break
   fi
-  got="$(sha256sum /tmp/frp.tgz | awk '{print $1}')"
-  if [ "$got" != "$frp_sha" ]; then
-    say "下载文件校验失败，已停止安装。"
-    exit 1
-  fi
-  say "下载完成，正在安装 frps"
-  tar -C /tmp -xzf /tmp/frp.tgz
-  install -m 755 "/tmp/frp_${ver}_linux_${frp_arch}/frps" /usr/local/bin/frps
-else
-  say "已有 /usr/local/bin/frps，跳过下载"
+done
+if [ -z "$archive" ]; then
+  say "找不到 $name"
+  say "请把压缩包和本脚本放在同一个目录后再运行。"
+  exit 1
 fi
+
+say "使用本机文件: $archive"
+if command -v sha256sum >/dev/null 2>&1; then
+  got="$(sha256sum "$archive" | awk '{print $1}')"
+  if [ "$got" != "$frp_sha" ]; then
+    say "文件校验失败。请重新上传 $name"
+    exit 1
+  fi
+  say "文件校验通过"
+fi
+
+say "正在安装 frps"
+rm -rf "/tmp/frp_${ver}_linux_${frp_arch}"
+tar -C /tmp -xzf "$archive"
+install -m 755 "/tmp/frp_${ver}_linux_${frp_arch}/frps" /usr/local/bin/frps
 
 say "正在写入配置"
 install -d -m 700 /etc/gate-frp
 if [ ! -s /etc/gate-frp/token ]; then
-  openssl rand -hex 24 >/etc/gate-frp/token
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 24 >/etc/gate-frp/token
+  else
+    od -An -tx1 -N24 /dev/urandom | tr -d ' \n' >/etc/gate-frp/token
+  fi
   chmod 600 /etc/gate-frp/token
 fi
 token="$(tr -d '[:space:]' </etc/gate-frp/token)"
@@ -118,22 +122,17 @@ if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>
   firewall-cmd --reload || true
 fi
 
-say "正在查询公网 IP"
-ip="$(curl -4 -fsS --connect-timeout 8 --max-time 15 https://ifconfig.me || true)"
-if [ -z "$ip" ]; then
-  ip="把这里换成这台机器的公网IP"
-fi
-
 say
-say "云服务器入口已启动。请把下面四行保存到沙箱的 webserver/data/vps.conf"
-say "VPS_IP=${ip}"
+say "云服务器入口已启动。这台机器不能访问外网，下面的 VPS_IP 请改成控制台里的公网 IP。"
+say "把改好的四行保存到沙箱的 webserver/data/vps.conf"
+say "VPS_IP=这里填公网IP"
 say "VPS_PORT=${port}"
 say "FRP_SERVER_PORT=7000"
 say "FRP_TOKEN=${token}"
 say
-say "还要在云服务器的安全组里放行 TCP ${port} 和 TCP 7000。"
+say "在云服务器安全组里放行 TCP ${port} 和 TCP 7000。入方向放行即可，云服务器不需要访问外网。"
 if [ "$port" = "80" ]; then
-  say "固定访问地址是: http://${ip}"
+  say "固定访问地址是: http://公网IP"
 else
-  say "固定访问地址是: http://${ip}:${port}"
+  say "固定访问地址是: http://公网IP:${port}"
 fi

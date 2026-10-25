@@ -1,0 +1,11 @@
+把本目录里的全部文件上传到云服务器的同一个目录，然后执行：
+
+  sudo bash setup-frps.sh
+
+脚本使用同目录里的压缩包，不会访问外网。
+常见云服务器是 x86_64，用 frp_0.71.1_linux_amd64.tar.gz。
+若执行 uname -m 显示 aarch64，脚本会改用 frp_0.71.1_linux_arm64.tar.gz。
+
+装完后终端打出四行配置。把 VPS_IP 改成这台云服务器的公网 IP，
+再把四行保存到沙箱的 webserver/data/vps.conf。
+安全组放行网页端口（一般是 80）和 TCP 7000。
