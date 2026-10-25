@@ -132,8 +132,9 @@ def shell_page() -> bytes:
     #url { flex: 1; min-width: 0; padding: 0.55rem 0.7rem; border-radius: 8px; border: 1px solid #3a4654; background: #1b232c; color: inherit; }
     button { padding: 0.55rem 0.7rem; border: 0; border-radius: 8px; background: #d7e6ff; color: #102033; }
     #stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; touch-action: none; }
-    #screen { max-width: 100%; max-height: 100%; background: #000; }
-    #keys { display: block; width: calc(100% - 0.8rem); box-sizing: border-box; margin: 0 0.4rem 0.4rem; padding: 0.55rem 0.7rem; border-radius: 8px; border: 1px solid #3a4654; background: #1b232c; color: inherit; font: inherit; font-size: 16px; }
+    #frame { position: relative; max-width: 100%; max-height: 100%; }
+    #screen { display: block; max-width: 100%; max-height: 100%; background: #000; }
+    #keys { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; border: 0; resize: none; outline: none; opacity: 0.01; color: transparent; background: transparent; caret-color: transparent; font-size: 16px; z-index: 2; }
     #note { margin: 0; padding: 0 0.5rem 0.4rem; color: #ffb4ab; font-size: 0.85rem; background: #101418; }
   </style>
 </head>
@@ -145,8 +146,7 @@ def shell_page() -> bytes:
     <form method="post" action="/logout"><button type="submit">退出</button></form>
   </header>
   <p id="note"></p>
-  <input id="keys" placeholder="点按画面后在这里输入，文字进入页面里的光标" autocomplete="off" autocapitalize="off" enterkeyhint="done">
-  <div id="stage"><img id="screen" alt="远程页面"></div>
+  <div id="stage"><div id="frame"><img id="screen" alt="远程页面"><textarea id="keys" autocomplete="off" autocapitalize="off"></textarea></div></div>
   <script>
     const screen = document.querySelector('#screen');
     const url = document.querySelector('#url');
@@ -217,23 +217,24 @@ def shell_page() -> bytes:
       });
       if (!response.ok) note.textContent = await response.text();
     };
-    screen.addEventListener('pointerdown', (ev) => {
+    keys.addEventListener('pointerdown', (ev) => {
       startAudio();
-      screen.setPointerCapture(ev.pointerId);
-      try { keys.focus({preventScroll: true}); } catch (err) { keys.focus(); }
+      try { keys.setPointerCapture(ev.pointerId); } catch (err) {}
       send(Object.assign({t: 'down', button: ev.button, click: ev.detail || 1}, point(ev)));
     });
-    screen.addEventListener('pointerup', (ev) => {
-      send(Object.assign({t: 'up', button: ev.button}, point(ev)));
+    keys.addEventListener('pointerup', async (ev) => {
+      const response = await send(Object.assign({t: 'up', button: ev.button}, point(ev)));
+      let data = {};
+      try { data = await response.json(); } catch (err) {}
+      if (!data.editable) keys.blur();
     });
-    screen.addEventListener('pointermove', (ev) => {
+    keys.addEventListener('pointermove', (ev) => {
       if (ev.buttons) send(Object.assign({t: 'move', button: ev.button}, point(ev)));
     });
-    screen.addEventListener('wheel', (ev) => {
+    keys.addEventListener('wheel', (ev) => {
       ev.preventDefault();
       send(Object.assign({t: 'wheel', dx: ev.deltaX, dy: ev.deltaY}, point(ev)));
     }, {passive: false});
-    keys.addEventListener('pointerdown', startAudio);
     keys.addEventListener('compositionstart', () => { composing = true; });
     keys.addEventListener('compositionend', (ev) => {
       composing = false;
@@ -492,11 +493,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/input":
             try:
-                BROWSER.handle_input(fields if isinstance(fields, dict) else {})
+                result = BROWSER.handle_input(fields if isinstance(fields, dict) else {}) or {}
             except (RuntimeError, TimeoutError) as exc:
                 self.send_bytes(503, str(exc).encode(), "text/plain; charset=utf-8")
                 return
-            self.send_bytes(204, b"", "text/plain")
+            self.send_bytes(200, json.dumps(result).encode(), "application/json")
             return
         self.send_html(404, page("未找到", "<p>未找到该页面。</p>"))
 

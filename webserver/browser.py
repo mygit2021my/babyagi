@@ -704,3 +704,26 @@ class RemoteBrowser:
                 )
                 return
             self._pointer(kind, x, y, button, int(event.get("click") or 1))
+            if kind == "up":
+                return {"editable": self.focused_editable()}
+            return {}
+
+    def focused_editable(self) -> bool:
+        result = self.call(
+            "Runtime.evaluate",
+            expression="""(() => {
+              const el = document.activeElement;
+              if (!el || el === document.body || el === document.documentElement) return false;
+              if (el.isContentEditable) return true;
+              const tag = (el.tagName || '').toUpperCase();
+              if (tag === 'TEXTAREA') return !el.readOnly && !el.disabled;
+              if (tag === 'INPUT') {
+                const type = (el.type || 'text').toLowerCase();
+                if (el.readOnly || el.disabled) return false;
+                return ['text','search','email','password','url','tel','number'].indexOf(type) >= 0;
+              }
+              return false;
+            })()""",
+            returnByValue=True,
+        )
+        return bool((result.get("result") or {}).get("value"))
