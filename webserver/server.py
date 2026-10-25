@@ -24,6 +24,7 @@ MAX_BYTES = 4_000_000
 TIMEOUT = 20
 MAX_REDIRECTS = 5
 COOKIE = "gate_session"
+ORIGIN_COOKIE = "gate_origin"
 SESSION_TTL = 7 * 24 * 3600
 
 BLOCKED_HOSTS = {
@@ -128,20 +129,27 @@ def check_target(url: str):
     return parts
 
 
-def fetch(url: str):
+def fetch(url: str, method: str = "GET", data: bytes | None = None, content_type: str | None = None):
     current = url
+    current_method = method
+    current_data = data
     for _ in range(MAX_REDIRECTS + 1):
         parts = check_target(current)
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Linux; Android 14; Mobile) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
+        if current_data is not None and content_type:
+            headers["Content-Type"] = content_type
         request = urllib.request.Request(
             urllib.parse.urlunsplit(parts),
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Linux; Android 14; Mobile) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
-                ),
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            },
-            method="GET",
+            data=current_data,
+            headers=headers,
+            method=current_method,
         )
         opener = urllib.request.build_opener(NoRedirect())
         try:
@@ -157,6 +165,9 @@ def fetch(url: str):
             if not location:
                 raise ValueError("目标返回了没有地址的跳转")
             current = urllib.parse.urljoin(current, location)
+            if status in (301, 302, 303):
+                current_method = "GET"
+                current_data = None
             continue
         body = response.read(MAX_BYTES + 1)
         if len(body) > MAX_BYTES:
@@ -194,6 +205,25 @@ def page(title: str, body: str) -> bytes:
     return document.encode()
 
 
+def join_target(query: dict) -> str:
+    target = (query.get("u") or [""])[-1].strip()
+    extras = []
+    for key, values in query.items():
+        if key == "u":
+            continue
+        for value in values:
+            extras.append((key, value))
+    if not target or not extras:
+        return target
+    if "://" not in target:
+        target = "https://" + target
+    parts = urllib.parse.urlsplit(target)
+    merged = urllib.parse.parse_qsl(parts.query, keep_blank_values=True) + extras
+    return urllib.parse.urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, urllib.parse.urlencode(merged), parts.fragment)
+    )
+
+
 def proxy_url(base_url: str, value: str) -> str:
     if not value or value.startswith(("#", "javascript:", "data:", "mailto:")):
         return value
@@ -223,11 +253,36 @@ def rewrite_html(text: str, base_url: str) -> str:
         attr,
         text,
     )
-    base = f'<base href="{html.escape(base_url, quote=True)}">'
+    origin = urllib.parse.urlsplit(base_url)
+    origin_url = f"{origin.scheme}://{origin.netloc}"
+    hook = (
+        f'<meta name="gate-origin" content="{html.escape(origin_url, quote=True)}">'
+        "<script>(function(){var m=document.querySelector('meta[name=\"gate-origin\"]');"
+        "var origin=m?m.content:location.origin;"
+        "function proxify(url){if(!url||/^(#|javascript:|data:|mailto:)/i.test(url))return url;"
+        "if(url.indexOf('/open?')===0)return url;var abs;try{abs=new URL(url,origin);}catch(e){return url;}"
+        "if(abs.protocol!=='http:'&&abs.protocol!=='https:')return url;"
+        "return '/open?u='+encodeURIComponent(abs.href);}"
+        "document.addEventListener('submit',function(ev){var form=ev.target;if(!form||form.tagName!=='FORM')return;"
+        "ev.preventDefault();ev.stopPropagation();"
+        "var action=form.getAttribute('action')||origin;var params=new URLSearchParams(new FormData(form));"
+        "var method=(form.getAttribute('method')||'get').toLowerCase();"
+        "if(action.indexOf('/open?')===0){var dest=new URL(action,location.origin);"
+        "params.forEach(function(v,k){if(k!=='u')dest.searchParams.append(k,v);});"
+        "if(method==='post'){var body=new URLSearchParams();var u=dest.searchParams.get('u')||origin;"
+        "body.set('u',u);params.forEach(function(v,k){if(k!=='u')body.append(k,v);});"
+        "fetch('/open',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body}).then(function(r){return r.text();}).then(function(t){document.open();document.write(t);document.close();});return;}"
+        "location.href=dest.pathname+dest.search;return;}"
+        "var abs=new URL(action,origin);if(method!=='post'){params.forEach(function(v,k){abs.searchParams.append(k,v);});"
+        "location.href=proxify(abs.href);return;}var body=new URLSearchParams();body.set('u',abs.href);"
+        "params.forEach(function(v,k){if(k!=='u')body.append(k,v);});"
+        "fetch('/open',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body}).then(function(r){return r.text();}).then(function(t){document.open();document.write(t);document.close();});"
+        "},true);})();</script>"
+    )
     head = re.search(r"(?i)<head[^>]*>", text)
     if head:
-        return text[: head.end()] + base + text[head.end() :]
-    return base + text
+        return text[: head.end()] + hook + text[head.end() :]
+    return hook + text
 
 
 def render_remote(content_type: str, body: bytes, final_url: str):
@@ -311,14 +366,15 @@ class Handler(BaseHTTPRequestHandler):
         if parts.path == "/open":
             if not self.require_user():
                 return
-            query = urllib.parse.parse_qs(parts.query)
-            target = (query.get("u") or [""])[-1].strip()
-            self.serve_target(target)
+            query = urllib.parse.parse_qs(parts.query, keep_blank_values=True)
+            self.serve_target(join_target(query))
             return
         if parts.path in ("/", ""):
             if not self.require_user():
                 return
             self.send_html(200, home_page(""))
+            return
+        if self.session_user() and self.proxy_relative(parts):
             return
         self.send_html(404, page("未找到", "<p>未找到该页面。</p>"))
 
@@ -355,27 +411,57 @@ class Handler(BaseHTTPRequestHandler):
             if not self.require_user():
                 return
             target = fields.get("u", "").strip()
-            self.serve_target(target)
+            extra = [(key, value) for key, value in fields.items() if key != "u"]
+            body = urllib.parse.urlencode(extra).encode() if extra else None
+            self.serve_target(target, method="POST", data=body)
             return
         self.send_html(404, page("未找到", "<p>未找到该页面。</p>"))
 
-    def serve_target(self, target: str):
+    def cookie_value(self, name: str) -> str:
+        for part in self.headers.get("Cookie", "").split(";"):
+            key, _, value = part.strip().partition("=")
+            if key == name:
+                return urllib.parse.unquote(value)
+        return ""
+
+    def proxy_relative(self, parts) -> bool:
+        origin = self.cookie_value(ORIGIN_COOKIE)
+        if not origin:
+            return False
+        target = origin.rstrip("/") + parts.path
+        if parts.query:
+            target += "?" + parts.query
+        self.serve_target(target)
+        return True
+
+    def serve_target(self, target: str, method: str = "GET", data: bytes | None = None):
         if not target:
             self.send_html(400, home_page("请输入要访问的地址"))
             return
         if "://" not in target:
             target = "https://" + target
         try:
-            status, content_type, body, final_url = fetch(target)
+            status, content_type, body, final_url = fetch(
+                target,
+                method=method,
+                data=data,
+                content_type="application/x-www-form-urlencoded" if data else None,
+            )
             content_type, body = render_remote(content_type, body, final_url)
         except ValueError as exc:
             self.send_html(400, home_page(str(exc)))
             return
+        origin = urllib.parse.urlsplit(final_url)
         self.send_response(status if 200 <= status < 600 else 502)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header(
+            "Set-Cookie",
+            f"{ORIGIN_COOKIE}={urllib.parse.quote(origin.scheme + '://' + origin.netloc)}; "
+            f"HttpOnly; Path=/; SameSite=Lax; Max-Age={SESSION_TTL}",
+        )
         self.end_headers()
         self.wfile.write(body)
 
