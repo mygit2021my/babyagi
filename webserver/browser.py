@@ -30,6 +30,7 @@ MODES = {
     "desktop": {
         "width": 1280,
         "height": 800,
+        "scale": 1,
         "mobile": False,
         "debug_port": int(os.environ.get("CHROME_DEBUG_PORT", "9224")),
         "profile": os.environ.get("CHROME_PROFILE", "/tmp/gate-chrome"),
@@ -40,12 +41,13 @@ MODES = {
     },
     "phone": {
         "width": 390,
-        "height": 844,
+        "height": 700,
+        "scale": 2,
         "mobile": True,
         "debug_port": int(os.environ.get("CHROME_PHONE_DEBUG_PORT", "9225")),
         "profile": "/tmp/gate-chrome-phone",
         "display": ":100",
-        "screen": "390x844x24",
+        "screen": "1080x2400x24",
         "sink": "gate_phone",
         "user_agent": PHONE_UA,
     },
@@ -231,7 +233,17 @@ def ensure_display_and_pulse(display: str, screen: str, sink: str) -> dict:
         env["XDG_RUNTIME_DIR"] = runtime
         env["PULSE_SINK"] = sink
         socket_path = _x_socket(display)
-        if not os.path.exists(socket_path):
+        number = display[1:] if display.startswith(":") else display
+        size_path = f"/tmp/gate-display-{number}.size"
+        recorded = ""
+        if os.path.exists(size_path):
+            recorded = open(size_path, encoding="utf-8").read().strip()
+        if recorded != screen or not os.path.exists(socket_path):
+            subprocess.run(["pkill", "-f", f"Xvfb {display} "], check=False)
+            for _ in range(20):
+                if not os.path.exists(socket_path):
+                    break
+                time.sleep(0.1)
             subprocess.Popen(
                 ["Xvfb", display, "-screen", "0", screen, "-ac"],
                 stdout=subprocess.DEVNULL,
@@ -242,6 +254,8 @@ def ensure_display_and_pulse(display: str, screen: str, sink: str) -> dict:
                 if os.path.exists(socket_path):
                     break
                 time.sleep(0.1)
+            with open(size_path, "w", encoding="utf-8") as fh:
+                fh.write(screen)
         subprocess.run(
             ["pulseaudio", "--start", "--exit-idle-time=-1", "--daemonize=yes"],
             env=env,
@@ -377,6 +391,7 @@ class RemoteBrowser:
         self.mode = mode
         self.view_w = spec["width"]
         self.view_h = spec["height"]
+        self.scale = spec["scale"]
         self.mobile = spec["mobile"]
         self.debug_port = spec["debug_port"]
         self.profile = spec["profile"]
@@ -446,7 +461,7 @@ class RemoteBrowser:
                 f"--remote-debugging-port={self.debug_port}",
                 "--remote-debugging-address=127.0.0.1",
                 f"--user-data-dir={self.profile}",
-                f"--window-size={self.view_w},{self.view_h}",
+                f"--window-size={self._window_size()}",
                 "--window-position=0,0",
                 f"--proxy-server=http://127.0.0.1:{EGRESS_PORT}",
                 "--proxy-bypass-list=<-loopback>",
@@ -473,24 +488,81 @@ class RemoteBrowser:
         self.call("Page.enable")
         self.call("Runtime.enable")
         self._apply_display()
+        self._start_screencast()
+        self.error = ""
+
+    def _window_size(self) -> str:
+        # The phone window covers the whole X screen so a 2x screenshot is not clipped.
+        # Layout size stays in CSS pixels and is set separately.
+        if self.mobile:
+            width, height, _depth = self.screen.split("x")
+            return f"{int(width)},{int(height)}"
+        return f"{self.view_w},{self.view_h}"
+
+    def _fit_window(self):
+        if not self.mobile:
+            return
+        try:
+            info = self.call("Browser.getWindowForTarget")
+            self.call(
+                "Browser.setWindowBounds",
+                windowId=info["windowId"],
+                bounds={
+                    "left": 0,
+                    "top": 0,
+                    "width": int(self.view_w * self.scale),
+                    "height": int(self.view_h * self.scale),
+                    "windowState": "normal",
+                },
+            )
+        except (RuntimeError, TimeoutError, KeyError):
+            return
+
+    def _start_screencast(self):
         self.call(
             "Page.startScreencast",
             format="jpeg",
-            quality=55,
-            maxWidth=self.view_w,
-            maxHeight=self.view_h,
+            quality=64,
+            maxWidth=int(self.view_w * self.scale),
+            maxHeight=int(self.view_h * self.scale),
             everyNthFrame=1,
         )
-        self.error = ""
+
+    def set_viewport(self, width, height):
+        """Match the phone layout viewport to the area the viewer can actually see."""
+        if not self.mobile:
+            return
+        width = max(280, min(540, int(width)))
+        height = max(420, min(1200, int(height)))
+        if abs(width - self.view_w) < 12 and abs(height - self.view_h) < 12:
+            return
+        self.ensure()
+        with self.input_lock:
+            if abs(width - self.view_w) < 12 and abs(height - self.view_h) < 12:
+                return
+            self.view_w = width
+            self.view_h = height
+            self.viewport = (width, height)
+            self._apply_display()
+            try:
+                self.call("Page.stopScreencast")
+            except (RuntimeError, TimeoutError):
+                pass
+            self._start_screencast()
 
     def _apply_display(self):
+        # screenWidth/Height follow the visible CSS viewport. Leaving them at the
+        # large X screen makes Chrome shrink the page to fit that screen.
         self.call(
             "Emulation.setDeviceMetricsOverride",
             width=self.view_w,
             height=self.view_h,
-            deviceScaleFactor=1,
+            deviceScaleFactor=self.scale,
             mobile=self.mobile,
+            screenWidth=self.view_w,
+            screenHeight=self.view_h,
         )
+        self._fit_window()
         if not self.user_agent:
             return
         metadata = {
@@ -610,10 +682,13 @@ class RemoteBrowser:
                 meta = params.get("metadata") or {}
                 with self.frame_lock:
                     self.frame = frame
-                    width = meta.get("deviceWidth") or self.viewport[0]
-                    height = meta.get("deviceHeight") or self.viewport[1]
-                    if width and height:
-                        self.viewport = (width, height)
+                    # deviceWidth is CSS width times scale. Clicks are CSS pixels,
+                    # so a scaled phone screenshot must not replace the layout size.
+                    if self.scale == 1:
+                        width = meta.get("deviceWidth") or self.viewport[0]
+                        height = meta.get("deviceHeight") or self.viewport[1]
+                        if width and height:
+                            self.viewport = (int(width), int(height))
             session_id = params.get("sessionId")
             if session_id is not None:
                 self.outbox.put(

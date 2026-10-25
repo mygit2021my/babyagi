@@ -156,11 +156,16 @@ def shell_page(mode: str) -> bytes:
     #screen { display: block; width: auto; height: auto; max-width: 100%; max-height: calc(100dvh - 3.6rem); background: #000; }
     #keys { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; border: 0; resize: none; outline: none; opacity: 0.01; color: transparent; background: transparent; caret-color: transparent; font-size: 16px; z-index: 2; }
     #note { margin: 0; padding: 0 0.5rem 0.4rem; color: #ffb4ab; font-size: 0.85rem; background: #101418; }
-    body.phone header { flex-wrap: wrap; }
-    body.phone #go { flex: 1 1 100%; order: 5; }
-    body.phone #url { width: 100%; font-size: 16px; }
-    body.phone button { min-height: 2.75rem; }
-    body.phone #screen { width: auto; height: auto; max-width: 100%; max-height: calc(100dvh - 7rem); }
+    body.phone { overflow: hidden; }
+    body.phone header { flex-wrap: nowrap; gap: 0.25rem; padding: 0.2rem 0.3rem; }
+    body.phone #mode { display: none; }
+    body.phone #go { flex: 1 1 auto; min-width: 0; display: flex; }
+    body.phone #url { width: 100%; font-size: 16px; padding: 0.4rem 0.5rem; }
+    body.phone button { min-height: 2.25rem; padding: 0.35rem 0.5rem; font-size: 0.9rem; }
+    body.phone #note:empty { display: none; padding: 0; }
+    body.phone #stage { width: 100%; align-items: stretch; justify-content: stretch; }
+    body.phone #frame { width: 100%; height: 100%; max-width: none; max-height: none; }
+    body.phone #screen { width: 100%; height: 100%; max-width: none; max-height: none; object-fit: fill; }
   </style>
 </head>
 <body class="__MODE__">
@@ -175,11 +180,14 @@ def shell_page(mode: str) -> bytes:
   <div id="stage"><div id="frame"><img id="screen" alt="远程页面"><textarea id="keys" autocomplete="off" autocapitalize="off"></textarea></div></div>
   <script>
     const screen = document.querySelector('#screen');
+    const stage = document.querySelector('#stage');
     const url = document.querySelector('#url');
     const keys = document.querySelector('#keys');
     const note = document.querySelector('#note');
+    const phone = document.body.classList.contains('phone');
     let previous = '';
     let view = {width: __WIDTH__, height: __HEIGHT__};
+    let gesture = null;
     let chain = Promise.resolve();
     let composing = false;
     let skipInput = false;
@@ -246,15 +254,37 @@ def shell_page(mode: str) -> bytes:
     keys.addEventListener('pointerdown', (ev) => {
       startAudio();
       try { keys.setPointerCapture(ev.pointerId); } catch (err) {}
-      send(Object.assign({t: 'down', button: ev.button, click: ev.detail || 1}, point(ev)));
+      gesture = {x: ev.clientX, y: ev.clientY, button: ev.button, click: ev.detail || 1, id: ev.pointerId, dragged: false};
+      if (!phone) send(Object.assign({t: 'down', button: ev.button, click: ev.detail || 1}, point(ev)));
     });
     keys.addEventListener('pointerup', async (ev) => {
+      const active = gesture;
+      gesture = null;
+      if (phone) {
+        if (!active || active.dragged) {
+          keys.blur();
+          return;
+        }
+        await send(Object.assign({t: 'down', button: active.button, click: active.click}, point(ev)));
+      }
       const response = await send(Object.assign({t: 'up', button: ev.button}, point(ev)));
       let data = {};
       try { data = await response.json(); } catch (err) {}
       if (!data.editable) keys.blur();
     });
+    keys.addEventListener('pointercancel', () => { gesture = null; });
     keys.addEventListener('pointermove', (ev) => {
+      if (phone) {
+        if (!gesture || ev.pointerId !== gesture.id) return;
+        const dx = ev.clientX - gesture.x;
+        const dy = ev.clientY - gesture.y;
+        if (!gesture.dragged && Math.hypot(dx, dy) < 10) return;
+        gesture.dragged = true;
+        gesture.x = ev.clientX;
+        gesture.y = ev.clientY;
+        send(Object.assign({t: 'wheel', dx: -dx, dy: -dy}, point(ev)));
+        return;
+      }
       if (ev.buttons) send(Object.assign({t: 'move', button: ev.button}, point(ev)));
     });
     keys.addEventListener('wheel', (ev) => {
@@ -303,6 +333,23 @@ def shell_page(mode: str) -> bytes:
         if (state.error) note.textContent = state.error;
       } catch (err) {}
       setTimeout(watch, 1000);
+    }
+    function publishViewport() {
+      if (!phone) return;
+      const rect = stage.getBoundingClientRect();
+      const w = Math.round(rect.width);
+      const h = Math.round(rect.height);
+      if (w < 200 || h < 300) return;
+      fetch('/viewport', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({w: w, h: h})
+      }).catch(() => {});
+    }
+    if (phone && window.ResizeObserver) {
+      new ResizeObserver(publishViewport).observe(stage);
+      publishViewport();
     }
     frames();
     watch();
@@ -527,6 +574,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/logout":
             self.redirect("/login", [("Set-Cookie", f"{COOKIE}=; HttpOnly; Path=/; Max-Age=0")])
+            return
+        if path == "/viewport":
+            browser = self.browser()
+            if browser.mode != "phone":
+                self.send_bytes(204, b"", "text/plain")
+                return
+            try:
+                browser.set_viewport(fields.get("w"), fields.get("h"))
+            except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+                self.send_bytes(503, str(exc).encode(), "text/plain; charset=utf-8")
+                return
+            self.send_bytes(204, b"", "text/plain")
             return
         if path == "/go":
             try:

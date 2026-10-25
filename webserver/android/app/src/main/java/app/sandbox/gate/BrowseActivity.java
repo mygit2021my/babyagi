@@ -22,6 +22,8 @@ public class BrowseActivity extends AppCompatActivity {
         web.getSettings().setDomStorageEnabled(true);
         web.getSettings().setUseWideViewPort(true);
         web.getSettings().setLoadWithOverviewMode(false);
+        web.getSettings().setTextZoom(100);
+        web.setInitialScale(100);
         String agent = web.getSettings().getUserAgentString();
         if (agent == null || agent.isEmpty()) {
             agent = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Mobile Safari/537.36";
