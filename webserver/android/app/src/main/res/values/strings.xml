@@ -3,4 +3,5 @@
     <string name="app_name">Gate</string>
     <!-- Cloud server that returns the current Cloudflare address. The app then connects there directly. -->
     <string name="server_base_url">http://47.102.127.210:8080</string>
+    <string name="address_key">1a253933d94f3ad63c981d90cb5100c0c4956c0cd0737fa713db04325824ab42</string>
 </resources>

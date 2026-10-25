@@ -106,4 +106,4 @@ say "VPS_IP=这里填公网IP"
 say "VPS_PORT=${port}"
 say "ADDR_TOKEN=${token}"
 say
-say "安全组只需放行 TCP ${port}。浏览器访问 http://公网IP 时只会拿到 Cloudflare 地址，后续流量不经过这台机器。"
+say "安全组只需放行 TCP ${port}。浏览器打开 http://公网IP 时只会看到加密后的乱码，解密口令不在这台机器上。"

@@ -123,15 +123,27 @@ if url="$(wait_ready)"; then
     for _ in 1 2 3 4 5 6 7 8 9 10; do
       got="$(curl -4 -fsS --connect-timeout 5 --max-time 8 "$board" 2>/dev/null || true)"
       got="$(printf '%s' "$got" | tr -d '[:space:]')"
-      if [ "$got" = "$url" ]; then
+        plain=""
+      key="$(conf_value ADDR_KEY || true)"
+      seal=""
+      case "$(uname -m)" in
+        x86_64) seal="$ROOT/vps/offline/gate-seal-linux-amd64" ;;
+        aarch64) seal="$ROOT/vps/offline/gate-seal-linux-arm64" ;;
+      esac
+      if [ -n "$key" ] && [ -x "$seal" ]; then
+        plain="$("$seal" decrypt "$key" "$got" 2>/dev/null || true)"
+      fi
+      if [ "$plain" = "$url" ] || [ "$got" = "$url" ]; then
         break
       fi
       sleep 2
     done
-    if [ "$got" = "$url" ]; then
+    if [ "$plain" = "$url" ]; then
+      say "云服务器正在发放加密地址。浏览器打开 $entry 后输入解密口令。"
+    elif [ "$got" = "$url" ]; then
       say "云服务器正在发放这个地址。浏览器打开 $entry"
     else
-      say "云服务器上的地址还不是 $url 。沙箱会继续上报。"
+      say "云服务器上的地址还没有换成当前隧道。沙箱会继续上报。"
     fi
   fi
   exit 0

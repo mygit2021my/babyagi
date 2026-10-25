@@ -180,7 +180,18 @@ public class LoginActivity extends AppCompatActivity {
         if (status != 200) {
             return "";
         }
-        return normalize(readBody(conn));
+        String body = normalize(readBody(conn));
+        if (isTunnel(body)) {
+            return body;
+        }
+        if (body.startsWith("g1.")) {
+            try {
+                return AddressCrypto.decrypt(getString(R.string.address_key), body);
+            } catch (Exception ex) {
+                return "";
+            }
+        }
+        return "";
     }
 
     private static String readBody(HttpURLConnection conn) throws IOException {
@@ -189,7 +200,7 @@ public class LoginActivity extends AppCompatActivity {
         int total = 0;
         try (InputStream in = conn.getInputStream()) {
             int n;
-            while ((n = in.read(tmp)) >= 0 && total < 300) {
+            while ((n = in.read(tmp)) >= 0 && total < 2000) {
                 buf.write(tmp, 0, n);
                 total += n;
             }

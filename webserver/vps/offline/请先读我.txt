@@ -2,15 +2,13 @@
 
   sudo bash setup-addr.sh
 
-这个程序只保存沙箱报上来的 Cloudflare 地址，并把访问者转到那个地址。
-网页、画面和声音不经过云服务器。云服务器也不需要访问外网。
+这个程序只保存沙箱报上来的加密地址，并把这串密文交给访问者。
+它不能解密，也不需要访问外网。解密口令不要放到这台机器上。
+
+如果以前安装过旧版，再执行一次 setup-addr.sh 即可换成新程序。
+原来的令牌会保留。换完后页面不再直接跳转到 Cloudflare。
 
 常见云服务器是 x86_64，用 gate-addr-linux-amd64。
 若 uname -m 显示 aarch64，脚本会改用 gate-addr-linux-arm64。
 
-装完后终端打出令牌。在沙箱执行：
-
-  bash webserver/use-vps.sh 公网IP 令牌 端口
-
-安全组放行脚本打印的那个 TCP 端口。浏览器以后访问 http://公网IP 。
-手机 App 的入口地址也填这个 http://公网IP 。
+安全组放行脚本打印的那个 TCP 端口。

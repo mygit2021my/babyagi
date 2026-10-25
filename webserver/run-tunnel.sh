@@ -63,13 +63,36 @@ conf_value() {
   awk -F= -v key="$key" '$1 == key { print substr($0, index($0, "=") + 1) }' "$VPS_CONF" | tail -n 1
 }
 
+seal_bin() {
+  local name
+  case "$(uname -m)" in
+    x86_64) name=amd64 ;;
+    aarch64) name=arm64 ;;
+    *) return 1 ;;
+  esac
+  if [ -x "$ROOT/vps/offline/gate-seal-linux-${name}" ]; then
+    printf '%s\n' "$ROOT/vps/offline/gate-seal-linux-${name}"
+  fi
+}
+
 push_addr() {
-  local url="$1" ip token port dest
+  local url="$1" ip token key port dest seal cipher
   ip="$(conf_value VPS_IP)"
   token="$(conf_value ADDR_TOKEN)"
+  key="$(conf_value ADDR_KEY)"
   port="$(conf_value VPS_PORT)"
-  [ -n "$ip" ] && [ -n "$token" ] || return 0
+  [ -n "$ip" ] && [ -n "$token" ] && [ -n "$key" ] || return 0
   tunnel_url "$url" || return 0
+  seal="$(seal_bin || true)"
+  if [ -z "$seal" ]; then
+    echo "push address failed" >>"$LOG"
+    return 1
+  fi
+  cipher="$("$seal" encrypt "$key" "$url" 2>/dev/null || true)"
+  if [ -z "$cipher" ]; then
+    echo "push address failed" >>"$LOG"
+    return 1
+  fi
   port="${port:-80}"
   if [ "$port" = "80" ]; then
     dest="http://${ip}/address"
@@ -79,7 +102,7 @@ push_addr() {
   if ! curl -4 -fsS --connect-timeout 5 --max-time 10 -X POST "$dest" \
     -H "X-Gate-Token: ${token}" \
     -H "Content-Type: text/plain" \
-    --data-binary "$url" >/dev/null; then
+    --data-binary "$cipher" >/dev/null; then
     echo "push address failed" >>"$LOG"
     return 1
   fi

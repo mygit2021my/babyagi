@@ -41,11 +41,20 @@ if [ "$code" != "200" ] && [ "$code" != "404" ]; then
   exit 1
 fi
 
+addr_key=""
+if [ -s "$ROOT/data/vps.conf" ]; then
+  addr_key="$(awk -F= '$1 == "ADDR_KEY" { print substr($0, index($0, "=") + 1) }' "$ROOT/data/vps.conf" | tail -n 1)"
+fi
+if [ -z "$addr_key" ]; then
+  addr_key="$(openssl rand -hex 32)"
+fi
+
 umask 077
 cat >"$ROOT/data/vps.conf" <<EOF
 VPS_IP=$ip
 VPS_PORT=$port
 ADDR_TOKEN=$token
+ADDR_KEY=$addr_key
 EOF
 chmod 600 "$ROOT/data/vps.conf"
 
