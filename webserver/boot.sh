@@ -24,7 +24,7 @@ web_up() {
 }
 
 tunnel_up() {
-  pgrep -f 'cloudflared tunnel --url http://127.0.0.1:8080' >/dev/null 2>&1
+  pgrep -f 'cloudflared tunnel' >/dev/null 2>&1
 }
 
 alive() {
@@ -38,17 +38,25 @@ start_web() {
     return 0
   fi
   echo "starting web $(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$ROOT/data/web.log"
-  python3 "$ROOT/server.py" >>"$ROOT/data/web.log" 2>&1 &
+  # setsid keeps the service alive when this supervisor is restarted.
+  setsid python3 "$ROOT/server.py" >>"$ROOT/data/web.log" 2>&1 </dev/null &
   echo $! >"$ROOT/data/web.pid"
 }
 
 publish_url() {
-  local url=""
+  local fixed="" url=""
+  if [ -s "$ROOT/data/fixed-url.txt" ]; then
+    fixed="$(tr -d '[:space:]' <"$ROOT/data/fixed-url.txt")"
+    if [[ "$fixed" == https://* ]]; then
+      printf '%s\n' "$fixed" >"$ROOT/data/public-url.txt"
+      return 0
+    fi
+  fi
   if [ -f "$ROOT/data/cloudflared.log" ]; then
     url="$(grep -oE 'https://[A-Za-z0-9-]+\.trycloudflare\.com' "$ROOT/data/cloudflared.log" | tail -n 1 || true)"
   fi
   # An empty new log must not fall back to an older tunnel log. That hostname is already dead.
-  if [ -z "$url" ] && [ ! -f "$ROOT/data/cloudflared.log" ] && [ -f /tmp/cloudflared-hello.log ]; then
+  if [ -z "$url" ] && [ ! -s "$ROOT/data/cloudflared.log" ] && [ -f /tmp/cloudflared-hello.log ]; then
     url="$(grep -oE 'https://[A-Za-z0-9-]+\.trycloudflare\.com' /tmp/cloudflared-hello.log | tail -n 1 || true)"
   fi
   if [ -n "$url" ]; then
@@ -61,7 +69,7 @@ start_tunnel() {
     return 0
   fi
   echo "starting tunnel $(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$ROOT/data/cloudflared.log"
-  "$ROOT/run-tunnel.sh" >>"$ROOT/data/cloudflared.log" 2>&1 &
+  setsid "$ROOT/run-tunnel.sh" >>"$ROOT/data/cloudflared.log" 2>&1 </dev/null &
   echo $! >"$ROOT/data/tunnel.pid"
 }
 

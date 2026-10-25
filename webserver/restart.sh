@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Stop the web service, the tunnel, and the remote browsers, then start them again.
-# A new tunnel receives a new public address. The installed Android app keeps its old address.
+# Restart the web service and the remote browsers.
+# The tunnel is left running. A Quick Tunnel name changes only when that process
+# itself stops. A named tunnel (data/tunnel.token plus data/fixed-url.txt) keeps
+# its address even if cloudflared is started again.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p "$ROOT/data" /tmp/gate-runtime
@@ -35,26 +37,21 @@ stop_services() {
   kill_match '/webserver/boot\.sh'
   wait_gone '/webserver/boot\.sh'
   kill_match '/webserver/server\.py'
-  kill_match '/webserver/run-tunnel\.sh'
-  kill_match 'cloudflared tunnel --url http://127\.0\.0\.1:8080'
   kill_match 'user-data-dir=/tmp/gate-chrome'
   kill_match 'gate_audio\.monitor'
   kill_match 'gate_phone\.monitor'
   kill_match 'Xvfb :99 '
   kill_match 'Xvfb :100 '
   wait_gone '/webserver/server\.py'
-  wait_gone '/webserver/run-tunnel\.sh'
-  wait_gone 'cloudflared tunnel --url http://127\.0\.0\.1:8080'
   wait_gone 'user-data-dir=/tmp/gate-chrome'
   wait_gone 'gate_audio\.monitor'
   wait_gone 'gate_phone\.monitor'
-  rm -f "$ROOT/data/web.pid" "$ROOT/data/tunnel.pid" "$ROOT/data/public-url.txt"
-  : >"$ROOT/data/cloudflared.log"
+  rm -f "$ROOT/data/web.pid"
 }
 
 start_services() {
   if [ -d /run/systemd/system ]; then
-    sudo systemctl restart gate-web.service gate-tunnel.service
+    sudo systemctl restart gate-web.service
     return 0
   fi
   local tmux_cmd=(tmux)
@@ -75,7 +72,7 @@ wait_ready() {
       url="$(tr -d '[:space:]' <"$ROOT/data/public-url.txt")"
     fi
     if curl -sf -o /dev/null --max-time 3 http://127.0.0.1:8080/login \
-      && [[ "$url" == https://*.trycloudflare.com ]] \
+      && [[ "$url" == https://* ]] \
       && curl -4 -skf -o /dev/null --max-time 8 "$url/login"; then
       printf '%s\n' "$url"
       return 0
@@ -88,14 +85,17 @@ wait_ready() {
   return 1
 }
 
-say "正在重启网页、隧道和远程浏览器"
+say "正在重启网页和远程浏览器，隧道保持运行"
 stop_services
 start_services
 if url="$(wait_ready)"; then
   say "网页服务已启动"
-  say "隧道已启动"
   say "当前访问地址: $url"
-  say "手机里已经安装的应用仍使用旧地址。地址变化后需要重新打包才能打开。"
+  if [ -s "$ROOT/data/fixed-url.txt" ]; then
+    say "这是固定地址，重启后不会变。"
+  else
+    say "这次没有重启隧道，所以地址没变。隧道进程或整台机器停掉后，临时地址会换掉。"
+  fi
   exit 0
 fi
 say "重启未完成。请查看 $ROOT/data/web.log 和 $ROOT/data/cloudflared.log"
