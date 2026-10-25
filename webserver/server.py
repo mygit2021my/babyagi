@@ -17,7 +17,7 @@ import hmac
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from browser import AUDIO, RemoteBrowser, send_ws, start_egress
+from browser import AUDIO_HUBS, BROWSERS, MODES, send_ws, start_egress
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(ROOT, "data")
@@ -46,7 +46,6 @@ def load_auth():
 
 
 AUTH = load_auth()
-BROWSER = RemoteBrowser()
 
 
 def sign(payload: bytes) -> str:
@@ -117,7 +116,9 @@ def login_page(error: str) -> bytes:
     )
 
 
-def shell_page() -> bytes:
+def shell_page(mode: str) -> bytes:
+    spec = MODES[mode]
+    label = "手机" if mode == "phone" else "电脑"
     document = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -127,19 +128,26 @@ def shell_page() -> bytes:
   <style>
     html, body { margin: 0; height: 100%; background: #000; color: #f4f7fb; font-family: sans-serif; }
     body { display: flex; flex-direction: column; height: 100dvh; }
-    header { display: flex; gap: 0.4rem; padding: 0.4rem; background: #101418; }
+    header { display: flex; gap: 0.4rem; align-items: center; padding: 0.4rem; background: #101418; }
     input, button { font: inherit; }
     #url { flex: 1; min-width: 0; padding: 0.55rem 0.7rem; border-radius: 8px; border: 1px solid #3a4654; background: #1b232c; color: inherit; }
     button { padding: 0.55rem 0.7rem; border: 0; border-radius: 8px; background: #d7e6ff; color: #102033; }
-    #stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; touch-action: none; }
-    #frame { position: relative; max-width: 100%; max-height: 100%; }
-    #screen { display: block; max-width: 100%; max-height: 100%; background: #000; }
+    #mode { font-size: 0.75rem; color: #9fb0c3; white-space: nowrap; }
+    #stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; touch-action: none; }
+    #frame { position: relative; max-width: 100%; max-height: 100%; line-height: 0; }
+    #screen { display: block; width: auto; height: auto; max-width: 100%; max-height: calc(100dvh - 3.6rem); background: #000; }
     #keys { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; border: 0; resize: none; outline: none; opacity: 0.01; color: transparent; background: transparent; caret-color: transparent; font-size: 16px; z-index: 2; }
     #note { margin: 0; padding: 0 0.5rem 0.4rem; color: #ffb4ab; font-size: 0.85rem; background: #101418; }
+    body.phone header { flex-wrap: wrap; }
+    body.phone #go { flex: 1 1 100%; order: 5; }
+    body.phone #url { width: 100%; font-size: 16px; }
+    body.phone button { min-height: 2.75rem; }
+    body.phone #screen { width: auto; height: auto; max-width: 100%; max-height: calc(100dvh - 7rem); }
   </style>
 </head>
-<body>
+<body class="__MODE__">
   <header>
+    <span id="mode">__LABEL__</span>
     <button type="button" id="back">后退</button>
     <form id="go"><input id="url" inputmode="url" placeholder="https://example.com" autocomplete="off"></form>
     <button type="submit" form="go">打开</button>
@@ -153,7 +161,7 @@ def shell_page() -> bytes:
     const keys = document.querySelector('#keys');
     const note = document.querySelector('#note');
     let previous = '';
-    let view = {width: 1280, height: 800};
+    let view = {width: __WIDTH__, height: __HEIGHT__};
     let chain = Promise.resolve();
     let composing = false;
     let skipInput = false;
@@ -283,6 +291,12 @@ def shell_page() -> bytes:
   </script>
 </body>
 </html>"""
+    document = (
+        document.replace("__MODE__", mode)
+        .replace("__LABEL__", label)
+        .replace("__WIDTH__", str(spec["width"]))
+        .replace("__HEIGHT__", str(spec["height"]))
+    )
     return document.encode()
 
 
@@ -362,6 +376,18 @@ class Handler(BaseHTTPRequestHandler):
             self.send_bytes(401, "需要登录".encode(), "text/plain; charset=utf-8")
         return None
 
+    def client_kind(self) -> str:
+        agent = self.headers.get("User-Agent", "")
+        if any(token in agent for token in ("GateAndroid", "Android", "iPhone", "iPad", "Mobile")):
+            return "phone"
+        return "desktop"
+
+    def browser(self):
+        return BROWSERS[self.client_kind()]
+
+    def audio(self):
+        return AUDIO_HUBS[self.client_kind()]
+
     def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path
         if path == "/login":
@@ -370,11 +396,11 @@ class Handler(BaseHTTPRequestHandler):
         if not self.require_user():
             return
         if path in ("/", ""):
-            self.send_html(200, shell_page())
+            self.send_html(200, shell_page(self.client_kind()))
             return
         if path == "/snap":
             try:
-                frame = BROWSER.snapshot()
+                frame = self.browser().snapshot()
             except RuntimeError as exc:
                 self.send_bytes(503, str(exc).encode(), "text/plain; charset=utf-8")
                 return
@@ -384,7 +410,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_bytes(200, frame, "image/jpeg")
             return
         if path == "/state":
-            body = json.dumps(BROWSER.status(), ensure_ascii=False).encode()
+            body = json.dumps(self.browser().status(), ensure_ascii=False).encode()
             self.send_bytes(200, body, "application/json")
             return
         if path == "/audio":
@@ -407,7 +433,8 @@ class Handler(BaseHTTPRequestHandler):
         except ConnectionError:
             return
         conn = self.connection
-        AUDIO.add(conn)
+        hub = self.audio()
+        hub.add(conn)
         try:
             while True:
                 frame = self.read_ws(conn)
@@ -421,7 +448,7 @@ class Handler(BaseHTTPRequestHandler):
         except (ConnectionError, OSError):
             pass
         finally:
-            AUDIO.remove(conn)
+            hub.remove(conn)
             self.close_connection = True
 
     def read_ws(self, conn: socket.socket):
@@ -485,7 +512,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/go":
             try:
-                BROWSER.open_url(str(fields.get("u", "")).strip())
+                self.browser().open_url(str(fields.get("u", "")).strip())
             except (ValueError, RuntimeError, TimeoutError) as exc:
                 self.send_bytes(400, str(exc).encode(), "text/plain; charset=utf-8")
                 return
@@ -493,7 +520,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/input":
             try:
-                result = BROWSER.handle_input(fields if isinstance(fields, dict) else {}) or {}
+                result = self.browser().handle_input(fields if isinstance(fields, dict) else {}) or {}
             except (RuntimeError, TimeoutError) as exc:
                 self.send_bytes(503, str(exc).encode(), "text/plain; charset=utf-8")
                 return
@@ -504,10 +531,11 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     start_egress()
-    try:
-        AUDIO.ensure()
-    except OSError as exc:
-        print(f"audio unavailable: {exc}", flush=True)
+    for name, hub in AUDIO_HUBS.items():
+        try:
+            hub.ensure()
+        except OSError as exc:
+            print(f"audio unavailable for {name}: {exc}", flush=True)
     httpd = ThreadingHTTPServer((BIND, PORT), Handler)
     print(f"listening on {BIND}:{PORT}", flush=True)
     httpd.serve_forever()

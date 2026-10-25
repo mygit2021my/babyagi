@@ -20,14 +20,36 @@ import urllib.request
 from websocket import WebSocketTimeoutException, create_connection
 
 CHROME = os.environ.get("CHROME", "/usr/bin/google-chrome-stable")
-DEBUG_PORT = int(os.environ.get("CHROME_DEBUG_PORT", "9224"))
 EGRESS_PORT = int(os.environ.get("EGRESS_PORT", "8081"))
-PROFILE = os.environ.get("CHROME_PROFILE", "/tmp/gate-chrome")
-VIEW_W = 1280
-VIEW_H = 800
-DISPLAY = ":99"
 RUNTIME_DIR = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
-AUDIO_ENV = os.environ.copy()
+PHONE_UA = (
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/156.0.0.0 Mobile Safari/537.36"
+)
+MODES = {
+    "desktop": {
+        "width": 1280,
+        "height": 800,
+        "mobile": False,
+        "debug_port": int(os.environ.get("CHROME_DEBUG_PORT", "9224")),
+        "profile": os.environ.get("CHROME_PROFILE", "/tmp/gate-chrome"),
+        "display": ":99",
+        "screen": "1280x800x24",
+        "sink": "gate_audio",
+        "user_agent": "",
+    },
+    "phone": {
+        "width": 390,
+        "height": 844,
+        "mobile": True,
+        "debug_port": int(os.environ.get("CHROME_PHONE_DEBUG_PORT", "9225")),
+        "profile": "/tmp/gate-chrome-phone",
+        "display": ":100",
+        "screen": "390x844x24",
+        "sink": "gate_phone",
+        "user_agent": PHONE_UA,
+    },
+}
 
 BLOCKED_HOSTS = {
     "localhost",
@@ -185,63 +207,70 @@ def start_egress(host: str = "127.0.0.1", port: int = EGRESS_PORT) -> EgressServ
     return server
 
 
-def ensure_display_and_pulse() -> dict:
-    global RUNTIME_DIR, AUDIO_ENV
+_MEDIA_LOCK = threading.Lock()
+
+
+def _runtime_dir() -> str:
+    global RUNTIME_DIR
     if not os.path.isdir(RUNTIME_DIR):
         RUNTIME_DIR = "/tmp/gate-runtime"
         os.makedirs(RUNTIME_DIR, mode=0o700, exist_ok=True)
-    env = os.environ.copy()
-    env["DISPLAY"] = DISPLAY
-    env["XDG_RUNTIME_DIR"] = RUNTIME_DIR
-    env["PULSE_SINK"] = "gate_audio"
-    if not os.path.exists("/tmp/.X11-unix/X99"):
-        subprocess.Popen(
-            ["Xvfb", DISPLAY, "-screen", "0", f"{VIEW_W}x{VIEW_H}x24", "-ac"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env=env,
-        )
-        for _ in range(30):
-            if os.path.exists("/tmp/.X11-unix/X99"):
-                break
-            time.sleep(0.1)
-    subprocess.run(
-        ["pulseaudio", "--start", "--exit-idle-time=-1", "--daemonize=yes"],
-        env=env,
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    listed = subprocess.run(
-        ["pactl", "list", "short", "sinks"],
-        env=env,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if "gate_audio" not in listed.stdout:
+    return RUNTIME_DIR
+
+
+def _x_socket(display: str) -> str:
+    number = display[1:] if display.startswith(":") else display
+    return f"/tmp/.X11-unix/X{number}"
+
+
+def ensure_display_and_pulse(display: str, screen: str, sink: str) -> dict:
+    with _MEDIA_LOCK:
+        runtime = _runtime_dir()
+        env = os.environ.copy()
+        env["DISPLAY"] = display
+        env["XDG_RUNTIME_DIR"] = runtime
+        env["PULSE_SINK"] = sink
+        socket_path = _x_socket(display)
+        if not os.path.exists(socket_path):
+            subprocess.Popen(
+                ["Xvfb", display, "-screen", "0", screen, "-ac"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=env,
+            )
+            for _ in range(30):
+                if os.path.exists(socket_path):
+                    break
+                time.sleep(0.1)
         subprocess.run(
-            [
-                "pactl",
-                "load-module",
-                "module-null-sink",
-                "sink_name=gate_audio",
-                "sink_properties=device.description=gate",
-            ],
+            ["pulseaudio", "--start", "--exit-idle-time=-1", "--daemonize=yes"],
             env=env,
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-    subprocess.run(
-        ["pactl", "set-default-sink", "gate_audio"],
-        env=env,
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    AUDIO_ENV = env
-    return env
+        listed = subprocess.run(
+            ["pactl", "list", "short", "sinks"],
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if sink not in listed.stdout:
+            subprocess.run(
+                [
+                    "pactl",
+                    "load-module",
+                    "module-null-sink",
+                    f"sink_name={sink}",
+                    "sink_properties=device.description=gate",
+                ],
+                env=env,
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        return env
 
 
 def send_ws(conn: socket.socket, opcode: int, payload: bytes):
@@ -259,7 +288,11 @@ def send_ws(conn: socket.socket, opcode: int, payload: bytes):
 
 
 class AudioHub:
-    def __init__(self):
+    def __init__(self, mode: str):
+        spec = MODES[mode]
+        self.display = spec["display"]
+        self.screen = spec["screen"]
+        self.sink = spec["sink"]
         self.clients = []
         self.lock = threading.Lock()
         self.start_lock = threading.Lock()
@@ -273,7 +306,7 @@ class AudioHub:
             self._spawn()
 
     def _spawn(self):
-        env = ensure_display_and_pulse()
+        env = ensure_display_and_pulse(self.display, self.screen, self.sink)
         self.proc = subprocess.Popen(
             [
                 "ffmpeg",
@@ -285,7 +318,7 @@ class AudioHub:
                 "-f",
                 "pulse",
                 "-i",
-                "gate_audio.monitor",
+                f"{self.sink}.monitor",
                 "-ac",
                 "1",
                 "-ar",
@@ -338,11 +371,19 @@ class AudioHub:
                         self.clients.remove(conn)
 
 
-AUDIO = AudioHub()
-
-
 class RemoteBrowser:
-    def __init__(self):
+    def __init__(self, mode: str):
+        spec = MODES[mode]
+        self.mode = mode
+        self.view_w = spec["width"]
+        self.view_h = spec["height"]
+        self.mobile = spec["mobile"]
+        self.debug_port = spec["debug_port"]
+        self.profile = spec["profile"]
+        self.display = spec["display"]
+        self.screen = spec["screen"]
+        self.sink = spec["sink"]
+        self.user_agent = spec["user_agent"]
         self.start_lock = threading.Lock()
         self.frame_lock = threading.Lock()
         self.frame = b""
@@ -359,7 +400,7 @@ class RemoteBrowser:
         self.id_lock = threading.Lock()
         self.input_lock = threading.Lock()
         self.next_id = 0
-        self.viewport = (VIEW_W, VIEW_H)
+        self.viewport = (self.view_w, self.view_h)
 
     def healthy(self) -> bool:
         return self.proc is not None and self.proc.poll() is None and self.ws is not None
@@ -379,20 +420,20 @@ class RemoteBrowser:
 
     def _start(self):
         self._stop()
-        subprocess.run(["pkill", "-f", f"user-data-dir={PROFILE}"], check=False)
+        subprocess.run(["pkill", "-f", f"user-data-dir={self.profile}"], check=False)
         for _ in range(25):
             probe = socket.socket()
             probe.settimeout(0.2)
             try:
-                busy = probe.connect_ex(("127.0.0.1", DEBUG_PORT)) == 0
+                busy = probe.connect_ex(("127.0.0.1", self.debug_port)) == 0
             finally:
                 probe.close()
             if not busy:
                 break
             time.sleep(0.2)
-        os.makedirs(PROFILE, exist_ok=True)
-        env = ensure_display_and_pulse()
-        log = open("/tmp/gate-chrome.log", "ab")
+        os.makedirs(self.profile, exist_ok=True)
+        env = ensure_display_and_pulse(self.display, self.screen, self.sink)
+        log = open(f"/tmp/gate-chrome-{self.mode}.log", "ab")
         self.proc = subprocess.Popen(
             [
                 CHROME,
@@ -402,10 +443,10 @@ class RemoteBrowser:
                 "--ozone-platform=x11",
                 "--use-gl=angle",
                 "--use-angle=swiftshader",
-                f"--remote-debugging-port={DEBUG_PORT}",
+                f"--remote-debugging-port={self.debug_port}",
                 "--remote-debugging-address=127.0.0.1",
-                f"--user-data-dir={PROFILE}",
-                f"--window-size={VIEW_W},{VIEW_H}",
+                f"--user-data-dir={self.profile}",
+                f"--window-size={self.view_w},{self.view_h}",
                 "--window-position=0,0",
                 f"--proxy-server=http://127.0.0.1:{EGRESS_PORT}",
                 "--proxy-bypass-list=<-loopback>",
@@ -431,22 +472,58 @@ class RemoteBrowser:
         self.reader.start()
         self.call("Page.enable")
         self.call("Runtime.enable")
-        self.call(
-            "Emulation.setDeviceMetricsOverride",
-            width=VIEW_W,
-            height=VIEW_H,
-            deviceScaleFactor=1,
-            mobile=False,
-        )
+        self._apply_display()
         self.call(
             "Page.startScreencast",
             format="jpeg",
             quality=55,
-            maxWidth=VIEW_W,
-            maxHeight=VIEW_H,
+            maxWidth=self.view_w,
+            maxHeight=self.view_h,
             everyNthFrame=1,
         )
         self.error = ""
+
+    def _apply_display(self):
+        self.call(
+            "Emulation.setDeviceMetricsOverride",
+            width=self.view_w,
+            height=self.view_h,
+            deviceScaleFactor=1,
+            mobile=self.mobile,
+        )
+        if not self.user_agent:
+            return
+        metadata = {
+            "brands": [
+                {"brand": "Chromium", "version": "156"},
+                {"brand": "Google Chrome", "version": "156"},
+                {"brand": "Not.A/Brand", "version": "24"},
+            ],
+            "fullVersionList": [
+                {"brand": "Chromium", "version": "156.0.0.0"},
+                {"brand": "Google Chrome", "version": "156.0.0.0"},
+            ],
+            "platform": "Android",
+            "platformVersion": "14.0.0",
+            "architecture": "",
+            "model": "Pixel 8",
+            "mobile": True,
+            "bitness": "",
+        }
+        try:
+            self.call(
+                "Emulation.setUserAgentOverride",
+                userAgent=self.user_agent,
+                acceptLanguage="zh-CN,zh;q=0.9,en;q=0.8",
+                platform="Linux armv8l",
+                userAgentMetadata=metadata,
+            )
+        except RuntimeError:
+            self.call("Emulation.setUserAgentOverride", userAgent=self.user_agent)
+        try:
+            self.call("Emulation.setTouchEmulationEnabled", enabled=True, maxTouchPoints=5)
+        except RuntimeError:
+            return
 
     def _wait_page(self):
         deadline = time.time() + 20
@@ -455,7 +532,7 @@ class RemoteBrowser:
             if self.proc.poll() is not None:
                 raise RuntimeError("浏览器启动失败")
             try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{DEBUG_PORT}/json", timeout=2) as resp:
+                with urllib.request.urlopen(f"http://127.0.0.1:{self.debug_port}/json", timeout=2) as resp:
                     tabs = json.load(resp)
             except (OSError, json.JSONDecodeError) as exc:
                 last = str(exc)
@@ -617,6 +694,7 @@ class RemoteBrowser:
             "title": self.title,
             "width": self.viewport[0],
             "height": self.viewport[1],
+            "mode": self.mode,
             "error": self.error,
         }
 
@@ -726,3 +804,7 @@ class RemoteBrowser:
             returnByValue=True,
         )
         return bool((result.get("result") or {}).get("value"))
+
+
+BROWSERS = {name: RemoteBrowser(name) for name in MODES}
+AUDIO_HUBS = {name: AudioHub(name) for name in MODES}
