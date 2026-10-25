@@ -99,13 +99,26 @@ push_addr() {
   else
     dest="http://${ip}:${port}/address"
   fi
-  if ! curl -4 -fsS --connect-timeout 5 --max-time 10 -X POST "$dest" \
+  code="$(curl -4 -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 -X POST "$dest" \
     -H "X-Gate-Token: ${token}" \
     -H "Content-Type: text/plain" \
-    --data-binary "$cipher" >/dev/null; then
-    echo "push address failed" >>"$LOG"
-    return 1
+    --data-binary "$cipher" || true)"
+  if [ "$code" = "204" ] || [ "$code" = "200" ]; then
+    return 0
   fi
+  # The cloud server copied earlier only accepts a plain address.
+  if [ "$code" = "400" ]; then
+    code="$(curl -4 -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 -X POST "$dest" \
+      -H "X-Gate-Token: ${token}" \
+      -H "Content-Type: text/plain" \
+      --data-binary "$url" || true)"
+    if [ "$code" = "204" ] || [ "$code" = "200" ]; then
+      echo "cloud server rejected ciphertext and stored the plain address" >>"$LOG"
+      return 0
+    fi
+  fi
+  echo "push address failed" >>"$LOG"
+  return 1
 }
 
 if [ -s "$TOKEN_FILE" ]; then
