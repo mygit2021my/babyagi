@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Gate</string>
+    <!-- Fixed login address. Replace this with a domain that is reachable from where the app is used. -->
+    <string name="server_base_url">https://settings-bracket-shots-developmental.trycloudflare.com</string>
+</resources>
