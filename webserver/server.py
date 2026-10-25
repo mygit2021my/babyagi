@@ -100,11 +100,29 @@ def page(title: str, body: str) -> bytes:
     return document.encode()
 
 
+def public_url() -> str:
+    path = os.path.join(DATA, "public-url.txt")
+    try:
+        value = open(path, encoding="utf-8").read().strip()
+    except OSError:
+        return ""
+    if value.startswith("https://") and " " not in value:
+        return value
+    return ""
+
+
 def login_page(error: str) -> bytes:
     message = f'<p class="err">{html.escape(error)}</p>' if error else ""
+    current = public_url()
+    address = (
+        f'<p>当前访问地址：<a href="{html.escape(current)}">{html.escape(current)}</a></p>'
+        if current
+        else ""
+    )
     return page(
         "登录",
         message
+        + address
         + """
         <h1>登录</h1>
         <form method="post" action="/login">
