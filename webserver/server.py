@@ -20,7 +20,7 @@ DATA = os.path.join(ROOT, "data")
 AUTH_PATH = os.path.join(DATA, "auth.json")
 PORT = int(os.environ.get("PORT", "8080"))
 BIND = os.environ.get("BIND", "0.0.0.0")
-MAX_BYTES = 4_000_000
+MAX_BYTES = 12_000_000
 TIMEOUT = 20
 MAX_REDIRECTS = 5
 COOKIE = "gate_session"
@@ -129,7 +129,34 @@ def check_target(url: str):
     return parts
 
 
-def fetch(url: str, method: str = "GET", data: bytes | None = None, content_type: str | None = None):
+def adapt_set_cookie(value: str, host: str, https: bool) -> str:
+    pieces = [part.strip() for part in value.split(";") if part.strip()]
+    if not pieces or "=" not in pieces[0]:
+        return ""
+    name, val = pieces[0].split("=", 1)
+    if name in (COOKIE, ORIGIN_COOKIE) or name.startswith("up."):
+        return ""
+    kept = [f"up.{host}.{name}={val}"]
+    for piece in pieces[1:]:
+        low = piece.lower()
+        if low.startswith("domain="):
+            continue
+        if not https and low == "secure":
+            continue
+        if not https and low.startswith("samesite=") and "none" in low:
+            kept.append("SameSite=Lax")
+            continue
+        kept.append(piece)
+    return "; ".join(kept)
+
+
+def fetch(
+    url: str,
+    method: str = "GET",
+    data: bytes | None = None,
+    content_type: str | None = None,
+    extra_headers: dict | None = None,
+):
     current = url
     current_method = method
     current_data = data
@@ -140,9 +167,11 @@ def fetch(url: str, method: str = "GET", data: bytes | None = None, content_type
                 "Mozilla/5.0 (Linux; Android 14; Mobile) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
             ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept": "*/*",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         }
+        if extra_headers:
+            headers.update(extra_headers)
         if current_data is not None and content_type:
             headers["Content-Type"] = content_type
         request = urllib.request.Request(
@@ -172,10 +201,11 @@ def fetch(url: str, method: str = "GET", data: bytes | None = None, content_type
         body = response.read(MAX_BYTES + 1)
         if len(body) > MAX_BYTES:
             response.close()
-            raise ValueError("页面超过 4MB，已停止")
+            raise ValueError("页面过大，已停止")
         content_type = response.headers.get("Content-Type", "application/octet-stream")
+        set_cookies = list(response.headers.get_all("Set-Cookie") or [])
         response.close()
-        return status, content_type, body, current
+        return status, content_type, body, current, set_cookies
     raise ValueError("跳转次数过多")
 
 
@@ -231,11 +261,20 @@ def proxy_url(base_url: str, value: str) -> str:
     return "/open?u=" + urllib.parse.quote(absolute, safe="")
 
 
-def rewrite_html(text: str, base_url: str) -> str:
+ATTR_RE = re.compile(
+    r"""(?i)\b(href|src|action|poster|srcset)\s*=\s*(?:(["'])(.*?)\2|([^\s"'=<>`]+))"""
+)
+RAW_RE = re.compile(r"(?is)(<(script|style|noscript|textarea)\b[^>]*>)(.*?)(</\2\s*>)")
+
+
+def rewrite_tag(tag: str, base_url: str) -> str:
+    if not tag.startswith("<") or tag.startswith("</") or re.match(r"(?i)<base\b", tag):
+        return tag
+
     def attr(match):
         name = match.group(1)
         quote = match.group(2)
-        value = match.group(3) if quote else match.group(4)
+        value = html.unescape(match.group(3) if quote else match.group(4))
         if name.lower() == "srcset":
             items = []
             for part in value.split(","):
@@ -246,35 +285,71 @@ def rewrite_html(text: str, base_url: str) -> str:
             value = ", ".join(items)
         else:
             value = proxy_url(base_url, value)
-        return f'{name}="{value}"'
+        return f'{name}="{html.escape(value, quote=True)}"'
 
-    text = re.sub(
-        r"""(?i)\b(href|src|action|poster|srcset)\s*=\s*(?:(["'])(.*?)\2|([^\s"'=<>`]+))""",
-        attr,
-        text,
-    )
+    return ATTR_RE.sub(attr, tag)
+
+
+def rewrite_fragment(fragment: str, base_url: str) -> str:
+    return re.sub(r"(?is)<[^>]+>", lambda match: rewrite_tag(match.group(0), base_url), fragment)
+
+
+def rewrite_html(text: str, base_url: str) -> str:
+    rebuilt = []
+    cursor = 0
+    for match in RAW_RE.finditer(text):
+        rebuilt.append(rewrite_fragment(text[cursor : match.start()], base_url))
+        open_tag, tag_name, body, close_tag = match.groups()
+        if tag_name.lower() == "script":
+            open_tag = rewrite_tag(open_tag, base_url)
+        elif tag_name.lower() == "style":
+            body = rewrite_css(body, base_url)
+        rebuilt.append(open_tag + body + close_tag)
+        cursor = match.end()
+    rebuilt.append(rewrite_fragment(text[cursor:], base_url))
+    text = "".join(rebuilt)
     origin = urllib.parse.urlsplit(base_url)
     origin_url = f"{origin.scheme}://{origin.netloc}"
     hook = (
         f'<meta name="gate-origin" content="{html.escape(origin_url, quote=True)}">'
         "<script>(function(){var m=document.querySelector('meta[name=\"gate-origin\"]');"
         "var origin=m?m.content:location.origin;"
-        "function proxify(url){if(!url||/^(#|javascript:|data:|mailto:)/i.test(url))return url;"
-        "if(url.indexOf('/open?')===0)return url;var abs;try{abs=new URL(url,origin);}catch(e){return url;}"
+        "function proxify(url){if(url==null)return url;url=String(url);"
+        "if(!url||/^(#|javascript:|data:|blob:|mailto:)/i.test(url))return url;"
+        "if(url.indexOf('/open?')===0||url.indexOf('/x?')===0)return url;"
+        "var abs;try{abs=new URL(url,origin);}catch(e){return url;}"
         "if(abs.protocol!=='http:'&&abs.protocol!=='https:')return url;"
-        "return '/open?u='+encodeURIComponent(abs.href);}"
+        "if(abs.host===location.host)return abs.pathname+abs.search;"
+        "return '/x?u='+encodeURIComponent(abs.href);}"
+        "var ofetch=window.fetch;if(ofetch){window.fetch=function(input,init){"
+        "if(typeof input==='string'||input instanceof URL)return ofetch.call(this,proxify(String(input)),init);"
+        "if(input&&input.url){var nu=proxify(input.url);if(nu!==input.url){try{input=new Request(nu,input);}catch(e){}}}"
+        "return ofetch.call(this,input,init);};}"
+        "var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(){"
+        "var a=Array.prototype.slice.call(arguments);if(a.length>1)a[1]=proxify(a[1]);return xo.apply(this,a);};"
+        "if(navigator.sendBeacon){var sb=navigator.sendBeacon.bind(navigator);"
+        "navigator.sendBeacon=function(url,data){return sb(proxify(url),data);};}"
+        "function hookProp(proto,prop){try{if(!proto)return;var d=Object.getOwnPropertyDescriptor(proto,prop);"
+        "if(!d||!d.set||!d.get)return;Object.defineProperty(proto,prop,{configurable:true,enumerable:d.enumerable,"
+        "get:function(){return d.get.call(this);},set:function(v){var next=typeof v==='string'?proxify(v):v;"
+        "try{d.set.call(this,next);}catch(e){d.set.call(this,v);}}});}catch(e){}}"
+        "if(window.HTMLImageElement)hookProp(HTMLImageElement.prototype,'src');"
+        "if(window.HTMLSourceElement)hookProp(HTMLSourceElement.prototype,'src');"
+        "if(window.HTMLMediaElement)hookProp(HTMLMediaElement.prototype,'src');"
+        "if(window.HTMLIFrameElement)hookProp(HTMLIFrameElement.prototype,'src');"
+        "if(window.HTMLLinkElement)hookProp(HTMLLinkElement.prototype,'href');"
         "document.addEventListener('submit',function(ev){var form=ev.target;if(!form||form.tagName!=='FORM')return;"
         "ev.preventDefault();ev.stopPropagation();"
         "var action=form.getAttribute('action')||origin;var params=new URLSearchParams(new FormData(form));"
         "var method=(form.getAttribute('method')||'get').toLowerCase();"
-        "if(action.indexOf('/open?')===0){var dest=new URL(action,location.origin);"
+        "if(action.indexOf('/open?')===0||action.indexOf('/x?')===0){var dest=new URL(action,location.origin);"
         "params.forEach(function(v,k){if(k!=='u')dest.searchParams.append(k,v);});"
         "if(method==='post'){var body=new URLSearchParams();var u=dest.searchParams.get('u')||origin;"
         "body.set('u',u);params.forEach(function(v,k){if(k!=='u')body.append(k,v);});"
         "fetch('/open',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body}).then(function(r){return r.text();}).then(function(t){document.open();document.write(t);document.close();});return;}"
         "location.href=dest.pathname+dest.search;return;}"
         "var abs=new URL(action,origin);if(method!=='post'){params.forEach(function(v,k){abs.searchParams.append(k,v);});"
-        "location.href=proxify(abs.href);return;}var body=new URLSearchParams();body.set('u',abs.href);"
+        "location.href='/open?u='+encodeURIComponent(abs.href);return;}var body=new URLSearchParams();body.set('u',abs.href);"
         "params.forEach(function(v,k){if(k!=='u')body.append(k,v);});"
         "fetch('/open',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body}).then(function(r){return r.text();}).then(function(t){document.open();document.write(t);document.close();});"
         "},true);})();</script>"
@@ -285,9 +360,22 @@ def rewrite_html(text: str, base_url: str) -> str:
     return hook + text
 
 
+def rewrite_css(text: str, base_url: str) -> str:
+    def repl(match):
+        raw = match.group(1).strip().strip("'\"")
+        if not raw or raw.startswith(("data:", "blob:", "#")):
+            return match.group(0)
+        absolute = urllib.parse.urljoin(base_url, raw)
+        if not absolute.startswith(("http://", "https://")):
+            return match.group(0)
+        return 'url("/x?u=' + urllib.parse.quote(absolute, safe="") + '")'
+
+    return re.sub(r"url\(\s*([^)]+?)\s*\)", repl, text)
+
+
 def render_remote(content_type: str, body: bytes, final_url: str):
     mime = content_type.split(";", 1)[0].strip().lower()
-    if mime not in ("text/html", "application/xhtml+xml"):
+    if mime not in ("text/html", "application/xhtml+xml", "text/css"):
         return content_type, body
     charset = "utf-8"
     for piece in content_type.split(";")[1:]:
@@ -295,6 +383,8 @@ def render_remote(content_type: str, body: bytes, final_url: str):
         if piece.lower().startswith("charset="):
             charset = piece.split("=", 1)[1].strip("\"' ") or "utf-8"
     text = body.decode(charset, errors="replace")
+    if mime == "text/css":
+        return "text/css; charset=utf-8", rewrite_css(text, final_url).encode()
     return "text/html; charset=utf-8", rewrite_html(text, final_url).encode()
 
 
@@ -363,11 +453,12 @@ class Handler(BaseHTTPRequestHandler):
         if parts.path == "/login":
             self.send_html(200, login_page(""))
             return
-        if parts.path == "/open":
+        if parts.path in ("/open", "/x"):
             if not self.require_user():
                 return
             query = urllib.parse.parse_qs(parts.query, keep_blank_values=True)
-            self.serve_target(join_target(query))
+            target = join_target(query) if parts.path == "/open" else (query.get("u") or [""])[-1].strip()
+            self.serve_target(target)
             return
         if parts.path in ("/", ""):
             if not self.require_user():
@@ -378,8 +469,41 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.send_html(404, page("未找到", "<p>未找到该页面。</p>"))
 
+    def read_body(self) -> bytes:
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        if length > 8_000_000:
+            raise ValueError("请求体过大")
+        return self.rfile.read(length) if length else b""
+
     def do_POST(self):
         parts = urllib.parse.urlsplit(self.path)
+        if parts.path == "/x":
+            if not self.require_user():
+                return
+            try:
+                data = self.read_body()
+            except ValueError as exc:
+                self.fail(413, str(exc))
+                return
+            query = urllib.parse.parse_qs(parts.query, keep_blank_values=True)
+            target = (query.get("u") or [""])[-1].strip()
+            self.serve_target(
+                target,
+                method="POST",
+                data=data,
+                content_type=self.headers.get("Content-Type"),
+            )
+            return
+        if parts.path not in ("/login", "/logout", "/open"):
+            try:
+                data = self.read_body()
+            except ValueError as exc:
+                self.fail(413, str(exc))
+                return
+            if self.session_user() and self.proxy_relative(parts, method="POST", data=data):
+                return
+            self.send_html(404, page("未找到", "<p>未找到该页面。</p>"))
+            return
         fields = self.form()
         if parts.path == "/login":
             username = fields.get("username", "")
@@ -413,7 +537,12 @@ class Handler(BaseHTTPRequestHandler):
             target = fields.get("u", "").strip()
             extra = [(key, value) for key, value in fields.items() if key != "u"]
             body = urllib.parse.urlencode(extra).encode() if extra else None
-            self.serve_target(target, method="POST", data=body)
+            self.serve_target(
+                target,
+                method="POST",
+                data=body,
+                content_type="application/x-www-form-urlencoded" if body else None,
+            )
             return
         self.send_html(404, page("未找到", "<p>未找到该页面。</p>"))
 
@@ -424,46 +553,120 @@ class Handler(BaseHTTPRequestHandler):
                 return urllib.parse.unquote(value)
         return ""
 
-    def proxy_relative(self, parts) -> bool:
+    def fail(self, status: int, message: str):
+        dest = self.headers.get("Sec-Fetch-Dest", "")
+        if self.path.startswith("/x") or dest not in ("", "document", "iframe"):
+            body = message.encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_html(status, home_page(message))
+
+    def upstream_headers(self, target: str) -> dict:
+        origin = urllib.parse.urlsplit(target)
+        host = origin.hostname or ""
+        forwarded = {}
+        for key in ("Accept", "Accept-Language", "Authorization", "Range"):
+            value = self.headers.get(key)
+            if value:
+                forwarded[key] = value
+        user_agent = self.headers.get("User-Agent")
+        if user_agent:
+            forwarded["User-Agent"] = user_agent.replace("HeadlessChrome", "Chrome")
+        for key, value in self.headers.items():
+            lower = key.lower()
+            if lower.startswith(("x-goog-", "x-youtube-", "x-client-data")):
+                forwarded[key] = value
+        prefix = f"up.{host}."
+        cookies = []
+        for part in self.headers.get("Cookie", "").split(";"):
+            piece = part.strip()
+            if not piece or "=" not in piece:
+                continue
+            name, value = piece.split("=", 1)
+            if name in (COOKIE, ORIGIN_COOKIE):
+                continue
+            if name.startswith("up."):
+                if name.startswith(prefix):
+                    cookies.append(f"{name[len(prefix):]}={value}")
+                continue
+            cookies.append(piece)
+        if cookies:
+            forwarded["Cookie"] = "; ".join(cookies)
+        base = f"{origin.scheme}://{origin.netloc}"
+        forwarded["Origin"] = base
+        forwarded["Referer"] = base + "/"
+        return forwarded
+
+    def proxy_relative(self, parts, method: str = "GET", data: bytes | None = None) -> bool:
         origin = self.cookie_value(ORIGIN_COOKIE)
         if not origin:
             return False
         target = origin.rstrip("/") + parts.path
         if parts.query:
             target += "?" + parts.query
-        self.serve_target(target)
+        self.serve_target(
+            target,
+            method=method,
+            data=data,
+            content_type=self.headers.get("Content-Type") if method != "GET" else None,
+        )
         return True
 
-    def serve_target(self, target: str, method: str = "GET", data: bytes | None = None):
+    def serve_target(
+        self,
+        target: str,
+        method: str = "GET",
+        data: bytes | None = None,
+        content_type: str | None = None,
+    ):
         if not target:
-            self.send_html(400, home_page("请输入要访问的地址"))
+            self.fail(400, "请输入要访问的地址")
             return
         if "://" not in target:
             target = "https://" + target
+        if method != "GET" and data is None:
+            data = b""
         try:
-            status, content_type, body, final_url = fetch(
+            status, content_type_out, body, final_url, set_cookies = fetch(
                 target,
                 method=method,
                 data=data,
-                content_type="application/x-www-form-urlencoded" if data else None,
+                content_type=content_type,
+                extra_headers=self.upstream_headers(target),
             )
-            content_type, body = render_remote(content_type, body, final_url)
+            content_type_out, body = render_remote(content_type_out, body, final_url)
         except ValueError as exc:
-            self.send_html(400, home_page(str(exc)))
+            self.fail(400, str(exc))
             return
         origin = urllib.parse.urlsplit(final_url)
+        https = self.headers.get("X-Forwarded-Proto", "http") == "https"
+        mime = content_type_out.split(";", 1)[0].strip().lower()
         self.send_response(status if 200 <= status < 600 else 502)
-        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Type", content_type_out)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header(
-            "Set-Cookie",
-            f"{ORIGIN_COOKIE}={urllib.parse.quote(origin.scheme + '://' + origin.netloc)}; "
-            f"HttpOnly; Path=/; SameSite=Lax; Max-Age={SESSION_TTL}",
-        )
+        for raw_cookie in set_cookies:
+            adapted = adapt_set_cookie(raw_cookie, origin.hostname or "", https)
+            if adapted:
+                self.send_header("Set-Cookie", adapted)
+        dest = (self.headers.get("Sec-Fetch-Dest") or "").lower()
+        if mime in ("text/html", "application/xhtml+xml") and dest in ("", "document"):
+            self.send_header(
+                "Set-Cookie",
+                f"{ORIGIN_COOKIE}={urllib.parse.quote(origin.scheme + '://' + origin.netloc)}; "
+                f"HttpOnly; Path=/; SameSite=Lax; Max-Age={SESSION_TTL}",
+            )
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except ConnectionError:
+            return
 
 
 def login_page(error: str) -> bytes:
