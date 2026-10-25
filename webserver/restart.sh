@@ -1,12 +1,30 @@
 #!/usr/bin/env bash
 # Restart the web service and the remote browsers.
-# The tunnel is left running. A Quick Tunnel name changes only when that process
-# itself stops. A named tunnel (data/tunnel.token plus data/fixed-url.txt) keeps
-# its address even if cloudflared is started again.
+# The tunnel is left running. The cloud server IP and token stay in
+# data/vps.conf and are not asked for again.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p "$ROOT/data" /tmp/gate-runtime
 chmod 700 /tmp/gate-runtime || true
+
+conf_value() {
+  local key="$1"
+  [ -s "$ROOT/data/vps.conf" ] || return 0
+  awk -F= -v key="$key" '$1 == key { print substr($0, index($0, "=") + 1) }' "$ROOT/data/vps.conf" | tail -n 1
+}
+
+vps_entry() {
+  local ip port
+  ip="$(conf_value VPS_IP)"
+  port="$(conf_value VPS_PORT)"
+  [ -n "$ip" ] || return 0
+  port="${port:-80}"
+  if [ "$port" = "80" ]; then
+    printf 'http://%s\n' "$ip"
+  else
+    printf 'http://%s:%s\n' "$ip" "$port"
+  fi
+}
 
 say() {
   printf '%s\n' "$*" >&2
@@ -85,16 +103,36 @@ wait_ready() {
   return 1
 }
 
+entry="$(vps_entry || true)"
+token="$(conf_value ADDR_TOKEN || true)"
+if [ -z "$entry" ] || [ -z "$token" ]; then
+  say "data/vps.conf 里还没有云服务器 IP 或令牌。网页仍会重启，固定入口不会更新。"
+else
+  say "固定入口: $entry"
+  say "云服务器 IP 和令牌从 data/vps.conf 读取，这次不需要重新填写。"
+fi
 say "正在重启网页和远程浏览器，隧道保持运行"
 stop_services
 start_services
 if url="$(wait_ready)"; then
   say "网页服务已启动"
-  say "当前访问地址: $url"
-  if [ -s "$ROOT/data/fixed-url.txt" ]; then
-    say "这是固定地址，重启后不会变。"
-  else
-    say "这次没有重启隧道，所以地址没变。隧道进程或整台机器停掉后，临时地址会换掉。"
+  say "Cloudflare 地址: $url"
+  if [ -n "$entry" ] && [ -n "$token" ]; then
+    board="${entry}/address"
+    got=""
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      got="$(curl -4 -fsS --connect-timeout 5 --max-time 8 "$board" 2>/dev/null || true)"
+      got="$(printf '%s' "$got" | tr -d '[:space:]')"
+      if [ "$got" = "$url" ]; then
+        break
+      fi
+      sleep 2
+    done
+    if [ "$got" = "$url" ]; then
+      say "云服务器正在发放这个地址。浏览器打开 $entry"
+    else
+      say "云服务器上的地址还不是 $url 。沙箱会继续上报。"
+    fi
   fi
   exit 0
 fi

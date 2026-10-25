@@ -87,9 +87,17 @@ push_addr() {
 
 if [ -s "$TOKEN_FILE" ]; then
   write_fixed_url || true
-  cloudflared tunnel --no-autoupdate --protocol http2 run --token-file "$TOKEN_FILE" >>"$LOG" 2>&1 &
+  (
+    exec 8>&-
+    exec 9>&-
+    exec cloudflared tunnel --no-autoupdate --protocol http2 run --token-file "$TOKEN_FILE"
+  ) >>"$LOG" 2>&1 &
 else
-  cloudflared tunnel --url http://127.0.0.1:8080 --protocol http2 --no-autoupdate >>"$LOG" 2>&1 &
+  (
+    exec 8>&-
+    exec 9>&-
+    exec cloudflared tunnel --url http://127.0.0.1:8080 --protocol http2 --no-autoupdate
+  ) >>"$LOG" 2>&1 &
 fi
 pid=$!
 trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT INT TERM

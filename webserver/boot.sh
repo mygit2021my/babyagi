@@ -8,10 +8,19 @@ mkdir -p "$ROOT/data" /tmp/gate-runtime
 chmod 700 /tmp/gate-runtime || true
 cd "$ROOT"
 
-exec 9>>"$ROOT/data/boot.lock"
+exec 9>>"$ROOT/data/supervisor.lock"
 if ! flock -n 9; then
   echo "gate boot is already running"
   exit 0
+fi
+
+if [ -s "$ROOT/data/vps.conf" ]; then
+  vps_ip="$(awk -F= '$1 == "VPS_IP" { print substr($0, index($0, "=") + 1) }' "$ROOT/data/vps.conf" | tail -n 1)"
+  vps_port="$(awk -F= '$1 == "VPS_PORT" { print substr($0, index($0, "=") + 1) }' "$ROOT/data/vps.conf" | tail -n 1)"
+  vps_token="$(awk -F= '$1 == "ADDR_TOKEN" { print substr($0, index($0, "=") + 1) }' "$ROOT/data/vps.conf" | tail -n 1)"
+  if [ -n "$vps_ip" ] && [ -n "$vps_token" ]; then
+    echo "address board ${vps_ip}:${vps_port:-80} token configured $(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$ROOT/data/web.log"
+  fi
 fi
 
 if [ -d /run/systemd/system ]; then
@@ -39,8 +48,12 @@ start_web() {
     return 0
   fi
   echo "starting web $(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$ROOT/data/web.log"
-  # setsid keeps the service alive when this supervisor is restarted.
-  setsid python3 "$ROOT/server.py" >>"$ROOT/data/web.log" 2>&1 </dev/null &
+  # Close the supervisor lock in the child. Otherwise a restarted boot
+  # thinks another supervisor is still running.
+  (
+    exec 9>&-
+    exec setsid python3 "$ROOT/server.py" >>"$ROOT/data/web.log" 2>&1 </dev/null
+  ) &
   echo $! >"$ROOT/data/web.pid"
 }
 
@@ -70,7 +83,10 @@ start_tunnel() {
     return 0
   fi
   echo "starting tunnel $(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$ROOT/data/cloudflared.log"
-  setsid "$ROOT/run-tunnel.sh" >>"$ROOT/data/cloudflared.log" 2>&1 </dev/null &
+  (
+    exec 9>&-
+    exec setsid "$ROOT/run-tunnel.sh" >>"$ROOT/data/cloudflared.log" 2>&1 </dev/null
+  ) &
   echo $! >"$ROOT/data/tunnel.pid"
 }
 
