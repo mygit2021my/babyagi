@@ -2,5 +2,5 @@
 <resources>
     <string name="app_name">Gate</string>
     <!-- Cloud server that returns the current Cloudflare address. The app then connects there directly. -->
-    <string name="server_base_url">https://threatening-structural-necessary-stating.trycloudflare.com</string>
+    <string name="server_base_url">http://47.102.127.210:8080</string>
 </resources>
