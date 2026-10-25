@@ -3,8 +3,12 @@ package app.sandbox.gate;
 import android.annotation.SuppressLint;
 import android.os.Bundle;
 import android.webkit.CookieManager;
+import android.webkit.WebResourceError;
+import android.webkit.WebResourceRequest;
 import android.webkit.WebView;
+import android.webkit.WebViewClient;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.appcompat.app.AppCompatActivity;
 
 public class BrowseActivity extends AppCompatActivity {
@@ -16,14 +20,29 @@ public class BrowseActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_browse);
         web = findViewById(R.id.web);
-        CookieManager.getInstance().setAcceptCookie(true);
-        CookieManager.getInstance().setAcceptThirdPartyCookies(web, true);
+        CookieManager cookies = CookieManager.getInstance();
+        cookies.setAcceptCookie(true);
+        cookies.setAcceptThirdPartyCookies(web, true);
         web.getSettings().setJavaScriptEnabled(true);
         web.getSettings().setDomStorageEnabled(true);
         web.getSettings().setUseWideViewPort(true);
         web.getSettings().setLoadWithOverviewMode(false);
+        web.getSettings().setSupportZoom(false);
+        web.getSettings().setBuiltInZoomControls(false);
+        web.getSettings().setMediaPlaybackRequiresUserGesture(false);
         web.getSettings().setTextZoom(100);
         web.setInitialScale(100);
+        web.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                if (request.isForMainFrame()) {
+                    view.loadData(
+                            "<html><body style=\"font-family:sans-serif;padding:24px\"><p>无法打开页面，请检查网络后再试。</p></body></html>",
+                            "text/html",
+                            "utf-8");
+                }
+            }
+        });
         String agent = web.getSettings().getUserAgentString();
         if (agent == null || agent.isEmpty()) {
             agent = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Mobile Safari/537.36";
@@ -32,6 +51,26 @@ public class BrowseActivity extends AppCompatActivity {
             agent = agent + " GateAndroid";
         }
         web.getSettings().setUserAgentString(agent);
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                if (web != null && web.canGoBack()) {
+                    web.goBack();
+                    return;
+                }
+                setEnabled(false);
+                getOnBackPressedDispatcher().onBackPressed();
+            }
+        });
         web.loadUrl(LoginActivity.baseUrl(this) + "/");
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (web != null) {
+            web.destroy();
+            web = null;
+        }
+        super.onDestroy();
     }
 }

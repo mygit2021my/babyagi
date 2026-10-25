@@ -3,6 +3,7 @@ package app.sandbox.gate;
 import android.content.Intent;
 import android.os.Bundle;
 import android.webkit.CookieManager;
+import android.webkit.WebView;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.TextView;
@@ -11,6 +12,7 @@ import androidx.appcompat.app.AppCompatActivity;
 
 import org.json.JSONObject;
 
+import java.io.IOException;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -29,6 +31,18 @@ public class LoginActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        CookieManager cookies = CookieManager.getInstance();
+        cookies.setAcceptCookie(true);
+        // CookieManager does not load persisted cookies until a WebView exists.
+        try {
+            new WebView(getApplicationContext());
+        } catch (RuntimeException ignored) {
+            // The cookie check below still runs; a missing WebView only skips auto-login.
+        }
+        if (hasSession()) {
+            openBrowse();
+            return;
+        }
         setContentView(R.layout.activity_login);
         EditText username = findViewById(R.id.username);
         EditText password = findViewById(R.id.password);
@@ -42,22 +56,63 @@ public class LoginActivity extends AppCompatActivity {
             new Thread(() -> {
                 try {
                     String token = signIn(user, pass);
-                    CookieManager cookies = CookieManager.getInstance();
-                    cookies.setAcceptCookie(true);
-                    cookies.setCookie(baseUrl(this), "gate_session=" + token + "; Path=/; Secure");
-                    cookies.flush();
-                    runOnUiThread(() -> {
-                        startActivity(new Intent(this, BrowseActivity.class));
-                        finish();
+                    storeSession(token, () -> {
+                        error.setText("登录状态没有保存");
+                        login.setEnabled(true);
                     });
                 } catch (Exception ex) {
                     runOnUiThread(() -> {
-                        error.setText(ex.getMessage() == null ? "登录失败" : ex.getMessage());
+                        if (isDestroyed()) {
+                            return;
+                        }
+                        error.setText(messageFor(ex));
                         login.setEnabled(true);
                     });
                 }
             }).start();
         });
+    }
+
+    private boolean hasSession() {
+        String cookie = CookieManager.getInstance().getCookie(baseUrl(this));
+        return cookie != null && cookie.contains("gate_session=");
+    }
+
+    private void storeSession(String token, Runnable onFailure) {
+        CookieManager cookies = CookieManager.getInstance();
+        cookies.setAcceptCookie(true);
+        String value = "gate_session=" + token + "; Path=/; Secure; SameSite=Lax; Max-Age=604800";
+        cookies.setCookie(baseUrl(this), value, success -> {
+            if (!Boolean.TRUE.equals(success)) {
+                runOnUiThread(() -> {
+                    if (!isDestroyed()) {
+                        onFailure.run();
+                    }
+                });
+                return;
+            }
+            cookies.flush();
+            runOnUiThread(() -> {
+                if (!isDestroyed()) {
+                    openBrowse();
+                }
+            });
+        });
+    }
+
+    private void openBrowse() {
+        startActivity(new Intent(this, BrowseActivity.class));
+        finish();
+    }
+
+    private String messageFor(Exception ex) {
+        if (ex instanceof IllegalStateException && ex.getMessage() != null) {
+            return ex.getMessage();
+        }
+        if (ex instanceof IOException) {
+            return "无法连接服务器";
+        }
+        return "登录失败";
     }
 
     private String signIn(String username, String password) throws Exception {

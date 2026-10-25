@@ -141,11 +141,11 @@ def shell_page(mode: str) -> bytes:
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, interactive-widget=resizes-content">
   <title>远程浏览</title>
   <style>
     html, body { margin: 0; height: 100%; background: #000; color: #f4f7fb; font-family: sans-serif; }
-    body { display: flex; flex-direction: column; height: 100dvh; }
+    body { display: flex; flex-direction: column; height: 100%; }
     header { display: flex; gap: 0.4rem; align-items: center; padding: 0.4rem; background: #101418; }
     input, button { font: inherit; }
     #url { flex: 1; min-width: 0; padding: 0.55rem 0.7rem; border-radius: 8px; border: 1px solid #3a4654; background: #1b232c; color: inherit; }
