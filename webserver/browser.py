@@ -25,6 +25,9 @@ EGRESS_PORT = int(os.environ.get("EGRESS_PORT", "8081"))
 PROFILE = os.environ.get("CHROME_PROFILE", "/tmp/gate-chrome")
 VIEW_W = 1280
 VIEW_H = 800
+DISPLAY = ":99"
+RUNTIME_DIR = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+AUDIO_ENV = os.environ.copy()
 
 BLOCKED_HOSTS = {
     "localhost",
@@ -182,6 +185,162 @@ def start_egress(host: str = "127.0.0.1", port: int = EGRESS_PORT) -> EgressServ
     return server
 
 
+def ensure_display_and_pulse() -> dict:
+    global RUNTIME_DIR, AUDIO_ENV
+    if not os.path.isdir(RUNTIME_DIR):
+        RUNTIME_DIR = "/tmp/gate-runtime"
+        os.makedirs(RUNTIME_DIR, mode=0o700, exist_ok=True)
+    env = os.environ.copy()
+    env["DISPLAY"] = DISPLAY
+    env["XDG_RUNTIME_DIR"] = RUNTIME_DIR
+    env["PULSE_SINK"] = "gate_audio"
+    if not os.path.exists("/tmp/.X11-unix/X99"):
+        subprocess.Popen(
+            ["Xvfb", DISPLAY, "-screen", "0", f"{VIEW_W}x{VIEW_H}x24", "-ac"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+        )
+        for _ in range(30):
+            if os.path.exists("/tmp/.X11-unix/X99"):
+                break
+            time.sleep(0.1)
+    subprocess.run(
+        ["pulseaudio", "--start", "--exit-idle-time=-1", "--daemonize=yes"],
+        env=env,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    listed = subprocess.run(
+        ["pactl", "list", "short", "sinks"],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if "gate_audio" not in listed.stdout:
+        subprocess.run(
+            [
+                "pactl",
+                "load-module",
+                "module-null-sink",
+                "sink_name=gate_audio",
+                "sink_properties=device.description=gate",
+            ],
+            env=env,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    subprocess.run(
+        ["pactl", "set-default-sink", "gate_audio"],
+        env=env,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    AUDIO_ENV = env
+    return env
+
+
+def send_ws(conn: socket.socket, opcode: int, payload: bytes):
+    header = bytearray([0x80 | opcode])
+    length = len(payload)
+    if length < 126:
+        header.append(length)
+    elif length < 65536:
+        header.append(126)
+        header += length.to_bytes(2, "big")
+    else:
+        header.append(127)
+        header += length.to_bytes(8, "big")
+    conn.sendall(header + payload)
+
+
+class AudioHub:
+    def __init__(self):
+        self.clients = []
+        self.lock = threading.Lock()
+        self.start_lock = threading.Lock()
+        self.proc = None
+        self.thread = None
+
+    def ensure(self):
+        with self.start_lock:
+            if self.proc is not None and self.proc.poll() is None:
+                return
+            self._spawn()
+
+    def _spawn(self):
+        env = ensure_display_and_pulse()
+        self.proc = subprocess.Popen(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-fflags",
+                "nobuffer",
+                "-f",
+                "pulse",
+                "-i",
+                "gate_audio.monitor",
+                "-ac",
+                "1",
+                "-ar",
+                "48000",
+                "-f",
+                "s16le",
+                "pipe:1",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=env,
+        )
+        if self.thread is None or not self.thread.is_alive():
+            self.thread = threading.Thread(target=self._pump, daemon=True)
+            self.thread.start()
+
+    def add(self, conn: socket.socket):
+        self.ensure()
+        with self.lock:
+            self.clients.append(conn)
+
+    def remove(self, conn: socket.socket):
+        with self.lock:
+            if conn in self.clients:
+                self.clients.remove(conn)
+
+    def _pump(self):
+        while True:
+            proc = self.proc
+            if proc is None or proc.stdout is None or proc.poll() is not None:
+                time.sleep(0.3)
+                try:
+                    self.ensure()
+                except OSError:
+                    time.sleep(1)
+                continue
+            chunk = proc.stdout.read(9600)
+            if not chunk:
+                time.sleep(0.2)
+                continue
+            with self.lock:
+                stale = []
+                for conn in self.clients:
+                    try:
+                        send_ws(conn, 2, chunk)
+                    except OSError:
+                        stale.append(conn)
+                for conn in stale:
+                    if conn in self.clients:
+                        self.clients.remove(conn)
+
+
+AUDIO = AudioHub()
+
+
 class RemoteBrowser:
     def __init__(self):
         self.start_lock = threading.Lock()
@@ -198,6 +357,7 @@ class RemoteBrowser:
         self.pending = set()
         self.result_ready = threading.Condition()
         self.id_lock = threading.Lock()
+        self.input_lock = threading.Lock()
         self.next_id = 0
         self.viewport = (VIEW_W, VIEW_H)
 
@@ -231,20 +391,22 @@ class RemoteBrowser:
                 break
             time.sleep(0.2)
         os.makedirs(PROFILE, exist_ok=True)
+        env = ensure_display_and_pulse()
         log = open("/tmp/gate-chrome.log", "ab")
         self.proc = subprocess.Popen(
             [
                 CHROME,
-                "--headless=new",
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
+                "--ozone-platform=x11",
                 "--use-gl=angle",
                 "--use-angle=swiftshader",
                 f"--remote-debugging-port={DEBUG_PORT}",
                 "--remote-debugging-address=127.0.0.1",
                 f"--user-data-dir={PROFILE}",
                 f"--window-size={VIEW_W},{VIEW_H}",
+                "--window-position=0,0",
                 f"--proxy-server=http://127.0.0.1:{EGRESS_PORT}",
                 "--proxy-bypass-list=<-loopback>",
                 "--no-first-run",
@@ -256,6 +418,7 @@ class RemoteBrowser:
             ],
             stdout=log,
             stderr=log,
+            env=env,
         )
         page = self._wait_page()
         self.outbox = queue.Queue()
@@ -367,8 +530,13 @@ class RemoteBrowser:
             data = params.get("data") or ""
             if data:
                 frame = base64.b64decode(data)
+                meta = params.get("metadata") or {}
                 with self.frame_lock:
                     self.frame = frame
+                    width = meta.get("deviceWidth") or self.viewport[0]
+                    height = meta.get("deviceHeight") or self.viewport[1]
+                    if width and height:
+                        self.viewport = (width, height)
             session_id = params.get("sessionId")
             if session_id is not None:
                 self.outbox.put(
@@ -452,63 +620,87 @@ class RemoteBrowser:
             "error": self.error,
         }
 
+    def _key(self, key: str, code: str, down: bool, text: str = ""):
+        vk = {
+            "Enter": 13,
+            "Backspace": 8,
+            "Tab": 9,
+            "Escape": 27,
+            "ArrowLeft": 37,
+            "ArrowUp": 38,
+            "ArrowRight": 39,
+            "ArrowDown": 40,
+            "Delete": 46,
+            " ": 32,
+        }.get(key, ord(key.upper()) if len(key) == 1 else 0)
+        params = {
+            "type": "keyDown" if down else "keyUp",
+            "key": key,
+            "code": code,
+            "windowsVirtualKeyCode": vk,
+            "nativeVirtualKeyCode": vk,
+        }
+        if text and down:
+            params["text"] = text
+            params["unmodifiedText"] = text.lower() if text.isalpha() else text
+        if len(key) == 1 and key.isalpha() and key.isupper():
+            params["modifiers"] = 8
+        self.call("Input.dispatchKeyEvent", **params)
+
+    def _pointer(self, kind: str, x: float, y: float, button: str, click: int):
+        mapping = {"down": "mousePressed", "up": "mouseReleased", "move": "mouseMoved"}
+        params = {
+            "type": mapping[kind],
+            "x": x,
+            "y": y,
+            "button": button,
+            "buttons": 0 if kind == "up" else 1,
+            "pointerType": "mouse",
+        }
+        if kind == "down":
+            params["clickCount"] = click
+        self.call("Input.dispatchMouseEvent", **params)
+
     def handle_input(self, event: dict):
         self.ensure()
         kind = event.get("t")
-        if kind == "text":
-            text = event.get("text") or ""
-            if text:
-                self.call("Input.insertText", text=text)
-            return
-        if kind == "key":
-            key = str(event.get("key") or "")
-            code = str(event.get("code") or "")
-            down = bool(event.get("down", True))
-            vk = {
-                "Enter": 13,
-                "Backspace": 8,
-                "Tab": 9,
-                "Escape": 27,
-                "ArrowLeft": 37,
-                "ArrowUp": 38,
-                "ArrowRight": 39,
-                "ArrowDown": 40,
-                "Delete": 46,
-            }.get(key, ord(key.upper()) if len(key) == 1 else 0)
-            params = {
-                "type": "keyDown" if down else "keyUp",
-                "key": key,
-                "code": code,
-                "windowsVirtualKeyCode": vk,
-                "nativeVirtualKeyCode": vk,
-            }
-            if down and len(key) == 1:
-                params["text"] = key
-            self.call("Input.dispatchKeyEvent", **params)
-            return
-        if kind == "back":
-            self.call("Runtime.evaluate", expression="history.back()")
-            return
-        if kind not in ("down", "up", "move", "wheel"):
-            return
-        try:
-            x = float(event.get("x", 0))
-            y = float(event.get("y", 0))
-        except (TypeError, ValueError):
-            return
-        button = {0: "left", 1: "middle", 2: "right"}.get(int(event.get("button") or 0), "left")
-        if kind == "wheel":
-            self.call(
-                "Input.dispatchMouseEvent",
-                type="mouseWheel",
-                x=x,
-                y=y,
-                deltaX=float(event.get("dx") or 0),
-                deltaY=float(event.get("dy") or 0),
-            )
-            return
-        mapping = {"down": "mousePressed", "up": "mouseReleased", "move": "mouseMoved"}
-        params = {"type": mapping[kind], "x": x, "y": y, "button": button}
-        if kind == "down":
-            params["clickCount"] = int(event.get("click") or 1)
-        self.call("Input.dispatchMouseEvent", **params)
+        with self.input_lock:
+            if kind == "text":
+                text = str(event.get("text") or "")
+                if len(text) == 1:
+                    code = f"Key{text.upper()}" if text.isalpha() else ("Space" if text == " " else "")
+                    self._key(text, code, True, text)
+                    self._key(text, code, False)
+                elif text:
+                    self.call("Input.insertText", text=text)
+                return
+            if kind == "key":
+                self._key(
+                    str(event.get("key") or ""),
+                    str(event.get("code") or ""),
+                    bool(event.get("down", True)),
+                )
+                return
+            if kind == "back":
+                self.call("Runtime.evaluate", expression="history.back()")
+                return
+            if kind not in ("down", "up", "move", "wheel"):
+                return
+            try:
+                x = float(event.get("x", 0))
+                y = float(event.get("y", 0))
+            except (TypeError, ValueError):
+                return
+            button = {0: "left", 1: "middle", 2: "right"}.get(int(event.get("button") or 0), "left")
+            if kind == "wheel":
+                self.call(
+                    "Input.dispatchMouseEvent",
+                    type="mouseWheel",
+                    x=x,
+                    y=y,
+                    deltaX=float(event.get("dx") or 0),
+                    deltaY=float(event.get("dy") or 0),
+                    pointerType="mouse",
+                )
+                return
+            self._pointer(kind, x, y, button, int(event.get("click") or 1))

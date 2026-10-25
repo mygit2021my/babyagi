@@ -5,16 +5,19 @@ The signed-in page does not rewrite the sites it opens. It shows the sandbox
 browser and forwards pointer, keyboard, and address-bar input to it.
 """
 
+import base64
+import hashlib
 import html
 import json
 import os
 import secrets
+import socket
 import time
 import hmac
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from browser import RemoteBrowser, start_egress
+from browser import AUDIO, RemoteBrowser, send_ws, start_egress
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(ROOT, "data")
@@ -130,7 +133,7 @@ def shell_page() -> bytes:
     button { padding: 0.55rem 0.7rem; border: 0; border-radius: 8px; background: #d7e6ff; color: #102033; }
     #stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; touch-action: none; }
     #screen { max-width: 100%; max-height: 100%; background: #000; }
-    #keys { position: absolute; opacity: 0; pointer-events: none; height: 0; }
+    #keys { display: block; width: calc(100% - 0.8rem); box-sizing: border-box; margin: 0 0.4rem 0.4rem; padding: 0.55rem 0.7rem; border-radius: 8px; border: 1px solid #3a4654; background: #1b232c; color: inherit; font: inherit; font-size: 16px; }
     #note { margin: 0; padding: 0 0.5rem 0.4rem; color: #ffb4ab; font-size: 0.85rem; background: #101418; }
   </style>
 </head>
@@ -142,30 +145,65 @@ def shell_page() -> bytes:
     <form method="post" action="/logout"><button type="submit">退出</button></form>
   </header>
   <p id="note"></p>
+  <input id="keys" placeholder="点按画面后在这里输入，文字进入页面里的光标" autocomplete="off" autocapitalize="off" enterkeyhint="done">
   <div id="stage"><img id="screen" alt="远程页面"></div>
-  <input id="keys" aria-hidden="true">
   <script>
     const screen = document.querySelector('#screen');
     const url = document.querySelector('#url');
     const keys = document.querySelector('#keys');
     const note = document.querySelector('#note');
     let previous = '';
+    let view = {width: 1280, height: 800};
+    let chain = Promise.resolve();
+    let composing = false;
+    let skipInput = false;
     function point(ev) {
       const rect = screen.getBoundingClientRect();
-      const width = screen.naturalWidth || rect.width || 1;
-      const height = screen.naturalHeight || rect.height || 1;
+      const width = view.width || screen.naturalWidth || rect.width || 1;
+      const height = view.height || screen.naturalHeight || rect.height || 1;
       return {
-        x: Math.max(0, (ev.clientX - rect.left) / rect.width * width),
-        y: Math.max(0, (ev.clientY - rect.top) / rect.height * height)
+        x: Math.max(0, (ev.clientX - rect.left) / Math.max(rect.width, 1) * width),
+        y: Math.max(0, (ev.clientY - rect.top) / Math.max(rect.height, 1) * height)
       };
     }
-    async function send(event) {
-      await fetch('/input', {
+    function send(event) {
+      const run = chain.then(() => fetch('/input', {
         method: 'POST',
         credentials: 'same-origin',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(event)
-      });
+      }));
+      chain = run.catch(() => {});
+      return run;
+    }
+    function startAudio() {
+      const context = window.__audioCtx || new AudioContext();
+      window.__audioCtx = context;
+      if (context.state === 'suspended') context.resume();
+      if (window.__audioOn) return;
+      window.__audioOn = true;
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const socket = new WebSocket(proto + '://' + location.host + '/audio');
+      socket.binaryType = 'arraybuffer';
+      let next = 0;
+      socket.onmessage = (ev) => {
+        const pcm = new Int16Array(ev.data);
+        if (!pcm.length) return;
+        const buf = context.createBuffer(1, pcm.length, 48000);
+        const channel = buf.getChannelData(0);
+        for (let i = 0; i < pcm.length; i++) channel[i] = pcm[i] / 32768;
+        const source = context.createBufferSource();
+        source.buffer = buf;
+        source.connect(context.destination);
+        const now = context.currentTime;
+        if (next < now + 0.05) next = now + 0.15;
+        source.start(next);
+        next += buf.duration;
+      };
+      socket.onclose = () => {
+        window.__audioOn = false;
+        setTimeout(startAudio, 1000);
+      };
     }
     document.querySelector('#back').onclick = () => send({t: 'back'});
     document.querySelector('#go').onsubmit = async (ev) => {
@@ -180,8 +218,9 @@ def shell_page() -> bytes:
       if (!response.ok) note.textContent = await response.text();
     };
     screen.addEventListener('pointerdown', (ev) => {
+      startAudio();
       screen.setPointerCapture(ev.pointerId);
-      keys.focus();
+      try { keys.focus({preventScroll: true}); } catch (err) { keys.focus(); }
       send(Object.assign({t: 'down', button: ev.button, click: ev.detail || 1}, point(ev)));
     });
     screen.addEventListener('pointerup', (ev) => {
@@ -194,17 +233,26 @@ def shell_page() -> bytes:
       ev.preventDefault();
       send(Object.assign({t: 'wheel', dx: ev.deltaX, dy: ev.deltaY}, point(ev)));
     }, {passive: false});
-    keys.addEventListener('input', () => {
-      if (keys.value) send({t: 'text', text: keys.value});
+    keys.addEventListener('pointerdown', startAudio);
+    keys.addEventListener('compositionstart', () => { composing = true; });
+    keys.addEventListener('compositionend', (ev) => {
+      composing = false;
+      skipInput = true;
+      const text = ev.data || keys.value;
       keys.value = '';
+      if (text) send({t: 'text', text: text});
+    });
+    keys.addEventListener('input', () => {
+      if (composing || skipInput) { skipInput = false; return; }
+      const text = keys.value;
+      keys.value = '';
+      if (text) send({t: 'text', text: text});
     });
     keys.addEventListener('keydown', (ev) => {
+      if (composing) return;
       if (ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey && !ev.altKey) return;
       ev.preventDefault();
       send({t: 'key', down: true, key: ev.key, code: ev.code});
-    });
-    keys.addEventListener('keyup', (ev) => {
-      if (ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey && !ev.altKey) return;
       send({t: 'key', down: false, key: ev.key, code: ev.code});
     });
     async function frames() {
@@ -223,6 +271,7 @@ def shell_page() -> bytes:
     async function watch() {
       try {
         const state = await fetch('/state', {cache: 'no-store', credentials: 'same-origin'}).then(r => r.json());
+        if (state.width && state.height) view = state;
         if (document.activeElement !== url && state.url) url.value = state.url;
         if (state.error) note.textContent = state.error;
       } catch (err) {}
@@ -238,6 +287,8 @@ def shell_page() -> bytes:
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "GateBrowser/1.0"
+    protocol_version = "HTTP/1.1"
+    rbufsize = 0
 
     def log_message(self, fmt, *args):
         print("%s - %s" % (self.address_string(), fmt % args), flush=True)
@@ -335,7 +386,68 @@ class Handler(BaseHTTPRequestHandler):
             body = json.dumps(BROWSER.status(), ensure_ascii=False).encode()
             self.send_bytes(200, body, "application/json")
             return
+        if path == "/audio":
+            self.stream_audio()
+            return
         self.send_html(404, page("未找到", "<p>未找到该页面。</p>"))
+
+    def stream_audio(self):
+        key = self.headers.get("Sec-WebSocket-Key", "")
+        if not key:
+            self.send_bytes(400, "需要 WebSocket".encode(), "text/plain; charset=utf-8")
+            return
+        accept = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
+        try:
+            self.send_response(101, "Switching Protocols")
+            self.send_header("Upgrade", "websocket")
+            self.send_header("Connection", "Upgrade")
+            self.send_header("Sec-WebSocket-Accept", accept)
+            self.end_headers()
+        except ConnectionError:
+            return
+        conn = self.connection
+        AUDIO.add(conn)
+        try:
+            while True:
+                frame = self.read_ws(conn)
+                if frame is None:
+                    break
+                opcode, payload = frame
+                if opcode == 8:
+                    break
+                if opcode == 9:
+                    send_ws(conn, 10, payload)
+        except (ConnectionError, OSError):
+            pass
+        finally:
+            AUDIO.remove(conn)
+            self.close_connection = True
+
+    def read_ws(self, conn: socket.socket):
+        def recvn(count: int) -> bytes:
+            data = b""
+            while len(data) < count:
+                piece = conn.recv(count - len(data))
+                if not piece:
+                    return b""
+                data += piece
+            return data
+
+        head = recvn(2)
+        if len(head) < 2:
+            return None
+        opcode = head[0] & 0x0F
+        masked = head[1] & 0x80
+        length = head[1] & 0x7F
+        if length == 126:
+            length = int.from_bytes(recvn(2), "big")
+        elif length == 127:
+            length = int.from_bytes(recvn(8), "big")
+        mask = recvn(4) if masked else b""
+        payload = recvn(length) if length else b""
+        if masked:
+            payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+        return opcode, payload
 
     def do_POST(self):
         path = urllib.parse.urlsplit(self.path).path
@@ -391,6 +503,10 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     start_egress()
+    try:
+        AUDIO.ensure()
+    except OSError as exc:
+        print(f"audio unavailable: {exc}", flush=True)
     httpd = ThreadingHTTPServer((BIND, PORT), Handler)
     print(f"listening on {BIND}:{PORT}", flush=True)
     httpd.serve_forever()
