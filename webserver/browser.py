@@ -667,11 +667,10 @@ class RemoteBrowser:
         with self.input_lock:
             if kind == "text":
                 text = str(event.get("text") or "")
-                if len(text) == 1:
-                    code = f"Key{text.upper()}" if text.isalpha() else ("Space" if text == " " else "")
-                    self._key(text, code, True, text)
-                    self._key(text, code, False)
-                elif text:
+                if text:
+                    # Printable text is already committed by the viewer's keyboard.
+                    # Replaying it as key events does not insert into some editors,
+                    # including Google's search box. insertText commits it directly.
                     self.call("Input.insertText", text=text)
                 return
             if kind == "key":
