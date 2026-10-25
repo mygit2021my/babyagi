@@ -2,5 +2,5 @@
 <resources>
     <string name="app_name">Gate</string>
     <!-- Fixed login address. Replace this with a domain that is reachable from where the app is used. -->
-    <string name="server_base_url">https://settings-bracket-shots-developmental.trycloudflare.com</string>
+    <string name="server_base_url">https://threatening-structural-necessary-stating.trycloudflare.com</string>
 </resources>

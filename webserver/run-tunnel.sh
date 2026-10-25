@@ -12,7 +12,7 @@ trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT INT
 
 while kill -0 "$pid" 2>/dev/null; do
   url="$(grep -oE 'https://[A-Za-z0-9-]+\.trycloudflare\.com' "$LOG" | tail -n 1 || true)"
-  if [ -z "$url" ] && [ -f /tmp/cloudflared-hello.log ]; then
+  if [ -z "$url" ] && [ ! -f "$LOG" ] && [ -f /tmp/cloudflared-hello.log ]; then
     url="$(grep -oE 'https://[A-Za-z0-9-]+\.trycloudflare\.com' /tmp/cloudflared-hello.log | tail -n 1 || true)"
   fi
   if [ -n "$url" ]; then

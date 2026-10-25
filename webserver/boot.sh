@@ -47,7 +47,8 @@ publish_url() {
   if [ -f "$ROOT/data/cloudflared.log" ]; then
     url="$(grep -oE 'https://[A-Za-z0-9-]+\.trycloudflare\.com' "$ROOT/data/cloudflared.log" | tail -n 1 || true)"
   fi
-  if [ -z "$url" ] && [ -f /tmp/cloudflared-hello.log ]; then
+  # An empty new log must not fall back to an older tunnel log. That hostname is already dead.
+  if [ -z "$url" ] && [ ! -f "$ROOT/data/cloudflared.log" ] && [ -f /tmp/cloudflared-hello.log ]; then
     url="$(grep -oE 'https://[A-Za-z0-9-]+\.trycloudflare\.com' /tmp/cloudflared-hello.log | tail -n 1 || true)"
   fi
   if [ -n "$url" ]; then
