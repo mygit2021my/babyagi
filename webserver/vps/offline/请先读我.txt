@@ -1,11 +1,16 @@
 把本目录里的全部文件上传到云服务器的同一个目录，然后执行：
 
-  sudo bash setup-frps.sh
+  sudo bash setup-addr.sh
 
-脚本使用同目录里的压缩包，不会访问外网。
-常见云服务器是 x86_64，用 frp_0.71.1_linux_amd64.tar.gz。
-若执行 uname -m 显示 aarch64，脚本会改用 frp_0.71.1_linux_arm64.tar.gz。
+这个程序只保存沙箱报上来的 Cloudflare 地址，并把访问者转到那个地址。
+网页、画面和声音不经过云服务器。云服务器也不需要访问外网。
 
-装完后终端打出四行配置。把 VPS_IP 改成这台云服务器的公网 IP，
-再把四行保存到沙箱的 webserver/data/vps.conf。
-安全组放行网页端口（一般是 80）和 TCP 7000。
+常见云服务器是 x86_64，用 gate-addr-linux-amd64。
+若 uname -m 显示 aarch64，脚本会改用 gate-addr-linux-arm64。
+
+装完后终端打出令牌。在沙箱执行：
+
+  bash webserver/use-vps.sh 公网IP 令牌 端口
+
+安全组放行脚本打印的那个 TCP 端口。浏览器以后访问 http://公网IP 。
+手机 App 的入口地址也填这个 http://公网IP 。

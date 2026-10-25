@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
-# Publish the local web service.
+# Publish the local web service through a Cloudflare tunnel.
 #
-# Stable address, no domain required: a cloud server with a fixed public IP.
-#   webserver/data/vps.conf    written by use-vps.sh, not committed
-# The cloud server runs webserver/vps/setup-frps.sh. This machine connects out
-# to it, and visitors use http://that-ip .
+# When webserver/data/vps.conf exists, this machine also tells that cloud
+# server the current Cloudflare address. The cloud server only hands the
+# address to visitors. It does not carry the page, screen, or audio.
 #
-# Otherwise this is a Cloudflare Quick Tunnel. That trycloudflare.com name
-# changes every time the process starts and cannot be reserved.
-# A Cloudflare named tunnel still works if these gitignored files exist:
+# A Quick Tunnel name changes every time cloudflared starts.
+# A named tunnel still works if these gitignored files exist:
 #   webserver/data/tunnel.token
 #   webserver/data/fixed-url.txt
 set -euo pipefail
@@ -19,7 +17,6 @@ URL_FILE="$ROOT/data/public-url.txt"
 TOKEN_FILE="$ROOT/data/tunnel.token"
 FIXED_FILE="$ROOT/data/fixed-url.txt"
 VPS_CONF="$ROOT/data/vps.conf"
-FRPC_CONF="$ROOT/data/frpc.toml"
 
 exec 8>>"$ROOT/data/tunnel.lock"
 if ! flock -n 8; then
@@ -27,7 +24,11 @@ if ! flock -n 8; then
 fi
 
 valid_url() {
-  [[ "$1" =~ ^https?://[A-Za-z0-9.:_-]+$ ]]
+  [[ "$1" =~ ^https://[A-Za-z0-9.-]+$ ]]
+}
+
+tunnel_url() {
+  [[ "$1" =~ ^https://[a-z0-9-]+\.trycloudflare\.com$ ]]
 }
 
 write_fixed_url() {
@@ -38,45 +39,53 @@ write_fixed_url() {
   printf '%s\n' "$fixed" >"$URL_FILE"
 }
 
-start_frpc() {
-  # shellcheck disable=SC1090
-  source "$VPS_CONF"
-  : "${VPS_IP:?}"
-  : "${VPS_PORT:?}"
-  : "${FRP_SERVER_PORT:?}"
-  : "${FRP_TOKEN:?}"
-  local frpc="${FRPC:-frpc}"
-  if ! command -v "$frpc" >/dev/null 2>&1; then
-    echo "frpc is not installed" >>"$LOG"
-    exit 1
+current_url() {
+  local fixed="" url=""
+  if [ -s "$FIXED_FILE" ]; then
+    fixed="$(tr -d '[:space:]' <"$FIXED_FILE")"
+    if valid_url "$fixed"; then
+      printf '%s\n' "$fixed"
+      return 0
+    fi
   fi
-  umask 077
-  cat >"$FRPC_CONF" <<EOF
-serverAddr = "$VPS_IP"
-serverPort = $FRP_SERVER_PORT
-auth.method = "token"
-auth.token = "$FRP_TOKEN"
-loginFailExit = false
-
-[[proxies]]
-name = "gate"
-type = "tcp"
-localIP = "127.0.0.1"
-localPort = 8080
-remotePort = $VPS_PORT
-EOF
-  if [ "$VPS_PORT" = "80" ]; then
-    printf 'http://%s\n' "$VPS_IP" >"$FIXED_FILE"
-  else
-    printf 'http://%s:%s\n' "$VPS_IP" "$VPS_PORT" >"$FIXED_FILE"
+  if [ -f "$LOG" ]; then
+    url="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$LOG" | tail -n 1 || true)"
   fi
-  write_fixed_url || true
-  "$frpc" -c "$FRPC_CONF" >>"$LOG" 2>&1 &
+  if [ -z "$url" ] && [ ! -s "$LOG" ] && [ -f /tmp/cloudflared-hello.log ]; then
+    url="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cloudflared-hello.log | tail -n 1 || true)"
+  fi
+  printf '%s\n' "$url"
 }
 
-if [ -s "$VPS_CONF" ]; then
-  start_frpc
-elif [ -s "$TOKEN_FILE" ]; then
+conf_value() {
+  local key="$1"
+  [ -s "$VPS_CONF" ] || return 0
+  awk -F= -v key="$key" '$1 == key { print substr($0, index($0, "=") + 1) }' "$VPS_CONF" | tail -n 1
+}
+
+push_addr() {
+  local url="$1" ip token port dest
+  ip="$(conf_value VPS_IP)"
+  token="$(conf_value ADDR_TOKEN)"
+  port="$(conf_value VPS_PORT)"
+  [ -n "$ip" ] && [ -n "$token" ] || return 0
+  tunnel_url "$url" || return 0
+  port="${port:-80}"
+  if [ "$port" = "80" ]; then
+    dest="http://${ip}/address"
+  else
+    dest="http://${ip}:${port}/address"
+  fi
+  if ! curl -4 -fsS --connect-timeout 5 --max-time 10 -X POST "$dest" \
+    -H "X-Gate-Token: ${token}" \
+    -H "Content-Type: text/plain" \
+    --data-binary "$url" >/dev/null; then
+    echo "push address failed" >>"$LOG"
+    return 1
+  fi
+}
+
+if [ -s "$TOKEN_FILE" ]; then
   write_fixed_url || true
   cloudflared tunnel --no-autoupdate --protocol http2 run --token-file "$TOKEN_FILE" >>"$LOG" 2>&1 &
 else
@@ -85,14 +94,20 @@ fi
 pid=$!
 trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT INT TERM
 
+pushed=""
+push_after=0
 while kill -0 "$pid" 2>/dev/null; do
-  if ! write_fixed_url; then
-    url="$(grep -oE 'https://[A-Za-z0-9-]+\.trycloudflare\.com' "$LOG" | tail -n 1 || true)"
-    if [ -z "$url" ] && [ ! -s "$LOG" ] && [ -f /tmp/cloudflared-hello.log ]; then
-      url="$(grep -oE 'https://[A-Za-z0-9-]+\.trycloudflare\.com' /tmp/cloudflared-hello.log | tail -n 1 || true)"
-    fi
-    if [ -n "$url" ]; then
-      printf '%s\n' "$url" >"$URL_FILE"
+  url="$(current_url || true)"
+  if [ -n "$url" ]; then
+    printf '%s\n' "$url" >"$URL_FILE"
+    now="$(date +%s)"
+    if [ "$url" != "$pushed" ] || [ "$now" -ge "$push_after" ]; then
+      if push_addr "$url"; then
+        pushed="$url"
+        push_after="$((now + 20))"
+      else
+        push_after="$((now + 5))"
+      fi
     fi
   fi
   sleep 1

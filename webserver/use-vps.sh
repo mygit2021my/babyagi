@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Point the public address at a cloud server with a fixed IP.
-# Usage: bash use-vps.sh <公网IP> <令牌> [网页端口]
+# Tell a cloud server the current Cloudflare address.
+# The server only gives that address to browsers and the app.
+# Usage: bash use-vps.sh <公网IP> <令牌> [端口]
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p "$ROOT/data"
 
 if [ "$#" -lt 2 ]; then
-  echo "用法: bash use-vps.sh <公网IP> <令牌> [网页端口]" >&2
+  echo "用法: bash use-vps.sh <公网IP> <令牌> [端口]" >&2
   exit 1
 fi
 
@@ -21,48 +22,72 @@ if ! [[ "$port" =~ ^[0-9]+$ ]]; then
   echo "端口不正确" >&2
   exit 1
 fi
+if ! [[ "$token" =~ ^[A-Za-z0-9]+$ ]]; then
+  echo "令牌格式不正确" >&2
+  exit 1
+fi
+
+if [ "$port" = "80" ]; then
+  board="http://$ip/address"
+  entry="http://$ip"
+else
+  board="http://$ip:$port/address"
+  entry="http://$ip:$port"
+fi
+
+code="$(curl -4 -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 8 "$board" || true)"
+if [ "$code" != "200" ] && [ "$code" != "404" ]; then
+  echo "还连不上 $entry 。请先在云服务器上运行 setup-addr.sh，并放行 TCP ${port}。当前隧道没有改动。" >&2
+  exit 1
+fi
 
 umask 077
 cat >"$ROOT/data/vps.conf" <<EOF
 VPS_IP=$ip
 VPS_PORT=$port
-FRP_SERVER_PORT=7000
-FRP_TOKEN=$token
+ADDR_TOKEN=$token
 EOF
 chmod 600 "$ROOT/data/vps.conf"
 
-# The supervisor restarts the tunnel from the new config. A Quick Tunnel name
-# is abandoned on purpose: the fixed IP replaces it.
-pkill -f '/webserver/boot\.sh' || true
-pkill -f '/webserver/run-tunnel\.sh' || true
-pkill -f 'cloudflared tunnel' || true
+# An old fixed URL pointed browsers at the cloud server itself. The public
+# address is the Cloudflare tunnel, which this file must not hide.
+if [ -s "$ROOT/data/fixed-url.txt" ]; then
+  fixed="$(tr -d '[:space:]' <"$ROOT/data/fixed-url.txt")"
+  if [[ "$fixed" != https://* ]]; then
+    rm -f "$ROOT/data/fixed-url.txt"
+  fi
+fi
+
+# Restart only the tunnel process. boot.sh starts it again with the new config.
 pkill -f '/frpc -c' || true
+pkill -f '/webserver/run-tunnel\.sh' || true
 sleep 1
-pkill -9 -f 'cloudflared tunnel' || true
 pkill -9 -f '/frpc -c' || true
-rm -f "$ROOT/data/tunnel.pid" "$ROOT/data/fixed-url.txt"
+pkill -f 'cloudflared tunnel' || true
+rm -f "$ROOT/data/tunnel.pid"
 
 tmux_cmd=(tmux)
 if [ -f /exec-daemon/tmux.portal.conf ]; then
   tmux_cmd=(tmux -f /exec-daemon/tmux.portal.conf)
 fi
-if "${tmux_cmd[@]}" has-session -t gate-boot 2>/dev/null; then
-  "${tmux_cmd[@]}" kill-session -t gate-boot || true
+if ! pgrep -f '/webserver/boot\.sh' >/dev/null 2>&1; then
+  if "${tmux_cmd[@]}" has-session -t gate-boot 2>/dev/null; then
+    "${tmux_cmd[@]}" kill-session -t gate-boot || true
+  fi
+  "${tmux_cmd[@]}" new-session -d -s gate-boot -c "$ROOT" -- "$ROOT/boot.sh"
 fi
-"${tmux_cmd[@]}" new-session -d -s gate-boot -c "$ROOT" -- "$ROOT/boot.sh"
 
-if [ "$port" = "80" ]; then
-  url="http://$ip"
-else
-  url="http://$ip:$port"
-fi
-echo "正在连接 $url"
-for _ in $(seq 1 40); do
-  if curl -4 -sf -o /dev/null --max-time 5 "$url/login"; then
-    echo "固定访问地址: $url"
+echo "正在把 Cloudflare 地址告知 $entry"
+for _ in $(seq 1 45); do
+  got="$(curl -4 -fsS --connect-timeout 5 --max-time 8 "$board" 2>/dev/null || true)"
+  got="$(printf '%s' "$got" | tr -d '[:space:]')"
+  if [[ "$got" =~ ^https://[a-z0-9-]+\.trycloudflare\.com$ ]]; then
+    echo "固定入口: $entry"
+    echo "当前 Cloudflare 地址: $got"
+    echo "浏览器打开固定入口后会转到 Cloudflare。后续流量不经过云服务器。"
     exit 0
   fi
-  sleep 1
+  sleep 2
 done
-echo "沙箱已改用这台云服务器，但 $url 还打不开。请确认安全组放行了网页端口和 7000。" >&2
+echo "沙箱会继续重试，但 $entry 现在还没有地址。请确认云服务器已运行 setup-addr.sh，并且安全组放行了 TCP ${port}。" >&2
 exit 1
