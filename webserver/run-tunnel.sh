@@ -113,7 +113,10 @@ push_addr() {
       -H "Content-Type: text/plain" \
       --data-binary "$url" || true)"
     if [ "$code" = "204" ] || [ "$code" = "200" ]; then
-      echo "cloud server rejected ciphertext and stored the plain address" >>"$LOG"
+      if [ "${plain_fallback_logged:-}" != "$url" ]; then
+        echo "cloud server rejected ciphertext and stored the plain address" >>"$LOG"
+        plain_fallback_logged="$url"
+      fi
       return 0
     fi
   fi
@@ -140,6 +143,7 @@ trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT INT
 
 pushed=""
 push_after=0
+plain_fallback_logged=""
 while kill -0 "$pid" 2>/dev/null; do
   url="$(current_url || true)"
   if [ -n "$url" ]; then

@@ -90,9 +90,65 @@ start_tunnel() {
   echo $! >"$ROOT/data/tunnel.pid"
 }
 
+# Quick Tunnels stay up after Cloudflare drops the name. Only NXDOMAIN counts;
+# a timeout or SERVFAIL must not kill a tunnel that is still registering.
+tunnel_hostname() {
+  local url=""
+  [ -s "$ROOT/data/cloudflared.log" ] || return 1
+  url="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$ROOT/data/cloudflared.log" | tail -n 1 || true)"
+  [ -n "$url" ] || return 1
+  printf '%s\n' "${url#https://}"
+}
+
+tunnel_age() {
+  local pid
+  pid="$(pgrep -f 'cloudflared tunnel' | head -n 1 || true)"
+  [ -n "$pid" ] || return 1
+  ps -o etimes= -p "$pid" 2>/dev/null | tr -d '[:space:]'
+}
+
+host_nxdomain() {
+  local host="$1" out
+  command -v dig >/dev/null 2>&1 || return 1
+  out="$(dig +time=2 +tries=1 "$host" A 2>/dev/null || true)"
+  printf '%s\n' "$out" | grep -q 'status: NXDOMAIN'
+}
+
+recycle_dead_tunnel() {
+  echo "recycling dead tunnel $(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$ROOT/data/web.log"
+  if [ -f "$ROOT/data/cloudflared.log" ]; then
+    mv -f "$ROOT/data/cloudflared.log" "$ROOT/data/cloudflared.log.prev"
+  fi
+  echo "tunnel log rotated $(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$ROOT/data/cloudflared.log"
+  if pgrep -f '/webserver/run-tunnel\.sh' >/dev/null 2>&1; then
+    pkill -f '/webserver/run-tunnel\.sh' || true
+  fi
+  if pgrep -f 'cloudflared tunnel' >/dev/null 2>&1; then
+    pkill -f 'cloudflared tunnel' || true
+  fi
+  rm -f "$ROOT/data/tunnel.pid"
+}
+
+heal_tick=0
+heal_after=0
 while true; do
   start_web || true
   start_tunnel || true
   publish_url || true
+  heal_tick=$((heal_tick + 1))
+  if [ "$heal_tick" -ge 10 ]; then
+    heal_tick=0
+    now="$(date +%s)"
+    if [ "$now" -ge "$heal_after" ] && [ ! -s "$ROOT/data/fixed-url.txt" ] \
+      && pgrep -f 'cloudflared tunnel' >/dev/null 2>&1; then
+      age="$(tunnel_age || true)"
+      host="$(tunnel_hostname || true)"
+      # A replacement needs time to register. Do not treat a young process as dead.
+      if [ -n "$age" ] && [ "$age" -ge 60 ] && [ -n "$host" ] && host_nxdomain "$host"; then
+        recycle_dead_tunnel
+        heal_after=$((now + 60))
+      fi
+    fi
+  fi
   sleep 2
 done

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Restart the web service and the remote browsers.
-# The tunnel is left running. The cloud server IP and token stay in
-# data/vps.conf and are not asked for again.
+# A tunnel whose name still answers is left running. A dead Quick Tunnel
+# (hostname gone, or the process still up but Cloudflare rejected it) is
+# replaced. The cloud server IP and token stay in data/vps.conf.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p "$ROOT/data" /tmp/gate-runtime
@@ -82,21 +83,63 @@ start_services() {
   "${tmux_cmd[@]}" new-session -d -s gate-boot -c "$ROOT" -- "$ROOT/boot.sh"
 }
 
+read_public_url() {
+  if [ -f "$ROOT/data/public-url.txt" ]; then
+    tr -d '[:space:]' <"$ROOT/data/public-url.txt"
+  fi
+}
+
+public_answers() {
+  local url="$1"
+  [[ "$url" == https://* ]] || return 1
+  curl -4 -skf -o /dev/null --max-time 8 "$url/login"
+}
+
+# A dead quick-tunnel process keeps running and retrying a name Cloudflare
+# has already dropped. Replace it so boot.sh can publish a new name.
+# Rotate the log first: the old process keeps its file descriptor, and the
+# replacement must not republish the dead name from the previous log.
+replace_dead_tunnel() {
+  say "当前隧道地址已失效，正在更换"
+  if [ -f "$ROOT/data/cloudflared.log" ]; then
+    mv -f "$ROOT/data/cloudflared.log" "$ROOT/data/cloudflared.log.prev"
+  fi
+  echo "tunnel log rotated $(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$ROOT/data/cloudflared.log"
+  kill_match '/webserver/run-tunnel\.sh'
+  kill_match 'cloudflared tunnel'
+  wait_gone '/webserver/run-tunnel\.sh'
+  wait_gone 'cloudflared tunnel'
+  rm -f "$ROOT/data/tunnel.pid"
+}
+
 wait_ready() {
-  local i url
-  for i in $(seq 1 90); do
-    url=""
-    if [ -f "$ROOT/data/public-url.txt" ]; then
-      url="$(tr -d '[:space:]' <"$ROOT/data/public-url.txt")"
+  local i url old="" named=0
+  old="$(read_public_url || true)"
+  for i in $(seq 1 40); do
+    if curl -sf -o /dev/null --max-time 3 http://127.0.0.1:8080/login; then
+      break
     fi
-    if curl -sf -o /dev/null --max-time 3 http://127.0.0.1:8080/login \
-      && [[ "$url" == https://* ]] \
-      && curl -4 -skf -o /dev/null --max-time 8 "$url/login"; then
+    if [ "$i" -eq 40 ]; then
+      return 1
+    fi
+    sleep 1
+  done
+  if public_answers "$old"; then
+    printf '%s\n' "$old"
+    return 0
+  fi
+  if [ -s "$ROOT/data/fixed-url.txt" ]; then
+    named=1
+  fi
+  replace_dead_tunnel
+  for i in $(seq 1 90); do
+    url="$(read_public_url || true)"
+    if { [ "$named" -eq 1 ] || [ "$url" != "$old" ]; } && public_answers "$url"; then
       printf '%s\n' "$url"
       return 0
     fi
     if [ $((i % 15)) -eq 0 ]; then
-      say "仍在等待隧道地址生效"
+      say "仍在等待新的隧道地址生效"
     fi
     sleep 1
   done
@@ -111,7 +154,7 @@ else
   say "固定入口: $entry"
   say "云服务器 IP 和令牌从 data/vps.conf 读取，这次不需要重新填写。"
 fi
-say "正在重启网页和远程浏览器，隧道保持运行"
+say "正在重启网页和远程浏览器。隧道地址有效则保持不变。"
 stop_services
 start_services
 if url="$(wait_ready)"; then
