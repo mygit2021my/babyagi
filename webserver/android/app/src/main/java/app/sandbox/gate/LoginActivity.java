@@ -60,6 +60,28 @@ public class LoginActivity extends AppCompatActivity {
         return isTunnel(saved) ? saved : "";
     }
 
+    static void clearService(Context context) {
+        context.getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(SERVICE_KEY).apply();
+    }
+
+    static boolean tunnelAnswers(String service) {
+        HttpURLConnection conn = null;
+        try {
+            conn = (HttpURLConnection) new URL(service + "/login").openConnection();
+            conn.setInstanceFollowRedirects(true);
+            conn.setConnectTimeout(8000);
+            conn.setReadTimeout(8000);
+            conn.setRequestMethod("GET");
+            return conn.getResponseCode() == 200;
+        } catch (IOException ex) {
+            return false;
+        } finally {
+            if (conn != null) {
+                conn.disconnect();
+            }
+        }
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -79,12 +101,6 @@ public class LoginActivity extends AppCompatActivity {
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(ENTRY_KEY).apply();
         entry.setText("");
         login.setEnabled(true);
-        String existing = baseUrl(this);
-        if (isTunnel(existing) && hasSession(existing)) {
-            serviceUrl = existing;
-            openBrowse();
-            return;
-        }
         login.setOnClickListener(view -> {
             error.setText("");
             login.setEnabled(false);
@@ -92,6 +108,28 @@ public class LoginActivity extends AppCompatActivity {
         });
         username.setEnabled(true);
         password.setEnabled(true);
+        String existing = baseUrl(this);
+        if (!isTunnel(existing) || !hasSession(existing)) {
+            return;
+        }
+        login.setEnabled(false);
+        error.setText("正在连接");
+        new Thread(() -> {
+            boolean ok = tunnelAnswers(existing);
+            runOnUiThread(() -> {
+                if (isDestroyed()) {
+                    return;
+                }
+                if (ok) {
+                    serviceUrl = existing;
+                    openBrowse();
+                    return;
+                }
+                clearService(LoginActivity.this);
+                error.setText("访问地址已失效，请重新填写入口");
+                login.setEnabled(true);
+            });
+        }).start();
     }
 
     private void resolve(String entryValue, boolean openIfSession) {

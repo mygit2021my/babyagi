@@ -1,6 +1,7 @@
 package app.sandbox.gate;
 
 import android.annotation.SuppressLint;
+import android.content.Intent;
 import android.os.Bundle;
 import android.webkit.CookieManager;
 import android.webkit.WebResourceError;
@@ -35,12 +36,14 @@ public class BrowseActivity extends AppCompatActivity {
         web.setWebViewClient(new WebViewClient() {
             @Override
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-                if (request.isForMainFrame()) {
-                    view.loadData(
-                            "<html><body style=\"font-family:sans-serif;padding:24px\"><p>无法打开页面，请检查网络后再试。</p></body></html>",
-                            "text/html",
-                            "utf-8");
+                if (!request.isForMainFrame() || isFinishing()) {
+                    return;
                 }
+                LoginActivity.clearService(BrowseActivity.this);
+                Intent intent = new Intent(BrowseActivity.this, LoginActivity.class);
+                intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                startActivity(intent);
+                finish();
             }
         });
         String agent = web.getSettings().getUserAgentString();
