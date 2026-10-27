@@ -17,7 +17,7 @@
         android:id="@+id/entry"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:hint="入口地址，例如 http://云服务器IP"
+        android:hint="入口地址"
         android:inputType="textUri" />
 
     <EditText

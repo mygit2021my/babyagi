@@ -55,25 +55,9 @@ public class LoginActivity extends AppCompatActivity {
         return entry;
     }
 
-    static String entryUrl(Context context) {
-        SharedPreferences prefs = context.getSharedPreferences(PREFS, MODE_PRIVATE);
-        String saved = entryRoot(prefs.getString(ENTRY_KEY, ""));
-        if (!saved.isEmpty()) {
-            return saved;
-        }
-        return entryRoot(context.getString(R.string.server_base_url));
-    }
-
     static String baseUrl(Context context) {
         String saved = normalize(context.getSharedPreferences(PREFS, MODE_PRIVATE).getString(SERVICE_KEY, ""));
-        if (isTunnel(saved)) {
-            return saved;
-        }
-        String entry = entryUrl(context);
-        if (isTunnel(entry)) {
-            return entry;
-        }
-        return saved.isEmpty() ? entry : saved;
+        return isTunnel(saved) ? saved : "";
     }
 
     @Override
@@ -92,10 +76,15 @@ public class LoginActivity extends AppCompatActivity {
         EditText password = findViewById(R.id.password);
         TextView error = findViewById(R.id.error);
         Button login = findViewById(R.id.login);
-        entry.setText(entryUrl(this));
-        login.setEnabled(false);
-        error.setText("正在获取访问地址");
-        resolve(entry.getText().toString(), true);
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(ENTRY_KEY).apply();
+        entry.setText("");
+        login.setEnabled(true);
+        String existing = baseUrl(this);
+        if (isTunnel(existing) && hasSession(existing)) {
+            serviceUrl = existing;
+            openBrowse();
+            return;
+        }
         login.setOnClickListener(view -> {
             error.setText("");
             login.setEnabled(false);
@@ -111,6 +100,11 @@ public class LoginActivity extends AppCompatActivity {
         EditText password = findViewById(R.id.password);
         TextView error = findViewById(R.id.error);
         Button login = findViewById(R.id.login);
+        if (entryRoot(entryValue).isEmpty()) {
+            error.setText("请填写入口地址");
+            login.setEnabled(true);
+            return;
+        }
         String user = username.getText().toString();
         String pass = password.getText().toString();
         new Thread(() -> {
@@ -135,7 +129,7 @@ public class LoginActivity extends AppCompatActivity {
                 }
                 serviceUrl = resolved;
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                        .putString(ENTRY_KEY, entryRoot(entry.getText().toString()))
+                        .remove(ENTRY_KEY)
                         .putString(SERVICE_KEY, resolved)
                         .apply();
                 if (openIfSession && hasSession(resolved)) {
