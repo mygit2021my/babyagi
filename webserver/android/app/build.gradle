@@ -1,0 +1,74 @@
+plugins {
+    id "com.android.application"
+}
+
+def keystorePropertiesFile = rootProject.file("keystore.properties")
+def keystoreProperties = new Properties()
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
+android {
+    namespace "app.sandbox.gate"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "app.sandbox.gate"
+        minSdk 24
+        targetSdk 34
+        versionCode 9
+        versionName "1.8"
+    }
+
+    signingConfigs {
+        release {
+            if (keystorePropertiesFile.exists()) {
+                storeFile rootProject.file(keystoreProperties["storeFile"])
+                storePassword keystoreProperties["storePassword"]
+                keyAlias keystoreProperties["keyAlias"]
+                keyPassword keystoreProperties["keyPassword"]
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (keystorePropertiesFile.exists()) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    applicationVariants.configureEach { variant ->
+        variant.outputs.configureEach { output ->
+            output.outputFileName = "Gate-${variant.versionName}.apk"
+        }
+    }
+}
+
+afterEvaluate {
+    tasks.named("assembleRelease").configure {
+        doLast {
+            def version = android.defaultConfig.versionName
+            def apk = layout.buildDirectory.file("outputs/apk/release/Gate-${version}.apk").get().asFile
+            def dest = rootProject.file("Gate-${version}.apk")
+            java.nio.file.Files.copy(apk.toPath(), dest.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        }
+    }
+}
+
+configurations.configureEach {
+    exclude group: "org.jetbrains.kotlin", module: "kotlin-stdlib-jdk7"
+    exclude group: "org.jetbrains.kotlin", module: "kotlin-stdlib-jdk8"
+}
+
+dependencies {
+    implementation "androidx.appcompat:appcompat:1.7.0"
+    implementation "androidx.activity:activity:1.9.2"
+}

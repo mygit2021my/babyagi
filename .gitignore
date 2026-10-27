@@ -1,1 +1,9 @@
 .env
+webserver/data/
+webserver/__pycache__/
+webserver/android/.gradle/
+webserver/android/build/
+webserver/android/app/build/
+webserver/android/local.properties
+webserver/android/keystore.properties
+webserver/android/*.keystore

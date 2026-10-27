@@ -1,0 +1,18 @@
+[Unit]
+Description=Gate Cloudflare tunnel
+After=network-online.target gate-web.service
+Wants=gate-web.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/workspace/webserver
+Environment=HOME=/home/ubuntu
+ExecStart=/workspace/webserver/run-tunnel.sh
+Restart=always
+RestartSec=3
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

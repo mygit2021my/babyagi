@@ -1,0 +1,19 @@
+把本目录里的全部文件上传到云服务器的同一个目录，然后执行：
+
+  sudo bash setup-addr.sh
+
+已经装过旧程序时，再执行一次即可替换。原来的令牌和对外端口会保留。
+如果以前手动加过 gate-addr-front，这次会停掉它，8080 仍由 gate-addr 监听。
+
+安装完成后在云服务器上检查：
+
+  curl -sI http://127.0.0.1:8080/ | head -n 1
+  curl -s http://127.0.0.1:8080/address
+
+第一行应是 HTTP/1.1 403 Forbidden，正文只有 “403 Forbidden”。
+第二行应是 g1. 开头的一串字符。
+
+常见云服务器是 x86_64，用 gate-addr-linux-amd64。
+若 uname -m 显示 aarch64，脚本会改用 gate-addr-linux-arm64。
+
+安全组放行脚本打印的那个 TCP 端口。口令不要放到这台机器上。
