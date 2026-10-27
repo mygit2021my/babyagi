@@ -44,6 +44,23 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+
+    applicationVariants.configureEach { variant ->
+        variant.outputs.configureEach { output ->
+            output.outputFileName = "Gate-${variant.versionName}.apk"
+        }
+    }
+}
+
+afterEvaluate {
+    tasks.named("assembleRelease").configure {
+        doLast {
+            def version = android.defaultConfig.versionName
+            def apk = layout.buildDirectory.file("outputs/apk/release/Gate-${version}.apk").get().asFile
+            def dest = rootProject.file("Gate-${version}.apk")
+            java.nio.file.Files.copy(apk.toPath(), dest.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        }
+    }
 }
 
 configurations.configureEach {
