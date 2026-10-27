@@ -14,6 +14,7 @@ import androidx.appcompat.app.AppCompatActivity;
 
 public class BrowseActivity extends AppCompatActivity {
     private WebView web;
+    private boolean retried;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -39,9 +40,18 @@ public class BrowseActivity extends AppCompatActivity {
                 if (!request.isForMainFrame() || isFinishing()) {
                     return;
                 }
-                LoginActivity.clearService(BrowseActivity.this);
+                if (!retried) {
+                    retried = true;
+                    view.postDelayed(() -> {
+                        if (!isFinishing() && web != null) {
+                            web.reload();
+                        }
+                    }, 800);
+                    return;
+                }
                 Intent intent = new Intent(BrowseActivity.this, LoginActivity.class);
-                intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                intent.putExtra("browse_failed", true);
+                intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
                 startActivity(intent);
                 finish();
             }

@@ -49,6 +49,21 @@ public class LoginActivity extends AppCompatActivity {
 
     static String entryRoot(String value) {
         String entry = normalize(value);
+        if (entry.isEmpty()) {
+            return "";
+        }
+        if (!entry.startsWith("http://") && !entry.startsWith("https://")) {
+            entry = "http://" + entry;
+        }
+        int cut = entry.indexOf('?');
+        if (cut >= 0) {
+            entry = entry.substring(0, cut);
+        }
+        cut = entry.indexOf('#');
+        if (cut >= 0) {
+            entry = entry.substring(0, cut);
+        }
+        entry = normalize(entry);
         if (entry.endsWith("/address")) {
             entry = normalize(entry.substring(0, entry.length() - "/address".length()));
         }
@@ -60,26 +75,35 @@ public class LoginActivity extends AppCompatActivity {
         return isTunnel(saved) ? saved : "";
     }
 
+    static String savedEntry(Context context) {
+        return entryRoot(context.getSharedPreferences(PREFS, MODE_PRIVATE).getString(ENTRY_KEY, ""));
+    }
+
     static void clearService(Context context) {
         context.getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(SERVICE_KEY).apply();
     }
 
-    static boolean tunnelAnswers(String service) {
-        HttpURLConnection conn = null;
-        try {
-            conn = (HttpURLConnection) new URL(service + "/login").openConnection();
-            conn.setInstanceFollowRedirects(true);
-            conn.setConnectTimeout(8000);
-            conn.setReadTimeout(8000);
-            conn.setRequestMethod("GET");
-            return conn.getResponseCode() == 200;
-        } catch (IOException ex) {
-            return false;
-        } finally {
-            if (conn != null) {
-                conn.disconnect();
+    static boolean tunnelAnswers(String service, int attempts) {
+        for (int attempt = 0; attempt < attempts; attempt++) {
+            HttpURLConnection conn = null;
+            try {
+                conn = (HttpURLConnection) new URL(service + "/login").openConnection();
+                conn.setInstanceFollowRedirects(true);
+                conn.setConnectTimeout(15000);
+                conn.setReadTimeout(15000);
+                conn.setRequestMethod("GET");
+                if (conn.getResponseCode() == 200) {
+                    return true;
+                }
+            } catch (IOException ex) {
+                // A slow link often fails the first attempt. Try once more.
+            } finally {
+                if (conn != null) {
+                    conn.disconnect();
+                }
             }
         }
+        return false;
     }
 
     @Override
@@ -98,24 +122,37 @@ public class LoginActivity extends AppCompatActivity {
         EditText password = findViewById(R.id.password);
         TextView error = findViewById(R.id.error);
         Button login = findViewById(R.id.login);
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(ENTRY_KEY).apply();
-        entry.setText("");
+        String remembered = savedEntry(this);
+        if (!remembered.isEmpty() && !isTunnel(remembered)) {
+            entry.setText(remembered);
+        }
         login.setEnabled(true);
         login.setOnClickListener(view -> {
             error.setText("");
             login.setEnabled(false);
-            resolve(entry.getText().toString(), false);
+            resolve(entry.getText().toString());
         });
         username.setEnabled(true);
         password.setEnabled(true);
+        boolean fromBrowse = getIntent().getBooleanExtra("browse_failed", false);
         String existing = baseUrl(this);
+        if (fromBrowse) {
+            if (remembered.isEmpty() || isTunnel(remembered)) {
+                error.setText("页面没有打开，请填写入口");
+                return;
+            }
+            login.setEnabled(false);
+            error.setText("正在重新获取访问地址");
+            new Thread(() -> refreshAfterFailure(existing, remembered, true)).start();
+            return;
+        }
         if (!isTunnel(existing) || !hasSession(existing)) {
             return;
         }
         login.setEnabled(false);
         error.setText("正在连接");
         new Thread(() -> {
-            boolean ok = tunnelAnswers(existing);
+            boolean ok = tunnelAnswers(existing, 1);
             runOnUiThread(() -> {
                 if (isDestroyed()) {
                     return;
@@ -125,20 +162,80 @@ public class LoginActivity extends AppCompatActivity {
                     openBrowse();
                     return;
                 }
-                clearService(LoginActivity.this);
-                error.setText("访问地址已失效，请重新填写入口");
-                login.setEnabled(true);
+                String entryValue = savedEntry(LoginActivity.this);
+                if (entryValue.isEmpty() || isTunnel(entryValue)) {
+                    clearService(LoginActivity.this);
+                    error.setText("访问地址已失效，请填写入口");
+                    login.setEnabled(true);
+                    return;
+                }
+                error.setText("正在重新获取访问地址");
+                new Thread(() -> refreshAfterFailure(existing, entryValue, false)).start();
             });
         }).start();
     }
 
-    private void resolve(String entryValue, boolean openIfSession) {
+    private void refreshAfterFailure(String previous, String entryValue, boolean fromBrowse) {
+        String service = "";
+        String problem = "无法连接入口";
+        try {
+            service = lookup(entryValue);
+            problem = "";
+        } catch (IOException ex) {
+            service = "";
+        }
+        boolean live = isTunnel(service) && tunnelAnswers(service, 2);
+        String resolved = service;
+        String failure = problem;
+        runOnUiThread(() -> applyRefresh(previous, entryValue, resolved, failure, live, fromBrowse));
+    }
+
+    private void applyRefresh(String previous, String entryValue, String service, String failure, boolean live, boolean fromBrowse) {
+        if (isDestroyed()) {
+            return;
+        }
         EditText entry = findViewById(R.id.entry);
+        TextView error = findViewById(R.id.error);
+        Button login = findViewById(R.id.login);
+        String root = entryRoot(entryValue);
+        if (!root.isEmpty() && !isTunnel(root)) {
+            entry.setText(root);
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(ENTRY_KEY, root).apply();
+        }
+        if (!isTunnel(service)) {
+            error.setText(failure.isEmpty() ? "没有拿到访问地址" : failure);
+            login.setEnabled(true);
+            return;
+        }
+        serviceUrl = service;
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(SERVICE_KEY, service).apply();
+        if (!live) {
+            error.setText("暂时连不上访问地址");
+            login.setEnabled(true);
+            return;
+        }
+        boolean same = service.equals(previous);
+        if (hasSession(service) && !(fromBrowse && same)) {
+            openBrowse();
+            return;
+        }
+        if (fromBrowse && same) {
+            error.setText("页面没有打开，请再登录一次");
+        } else if (!same) {
+            error.setText("访问地址已更新，请重新登录");
+        } else {
+            error.setText("请重新登录");
+        }
+        login.setEnabled(true);
+    }
+
+    private void resolve(String entryValue) {
         EditText username = findViewById(R.id.username);
         EditText password = findViewById(R.id.password);
         TextView error = findViewById(R.id.error);
         Button login = findViewById(R.id.login);
-        if (entryRoot(entryValue).isEmpty()) {
+        String root = entryRoot(entryValue);
+        if (root.isEmpty()) {
             error.setText("请填写入口地址");
             login.setEnabled(true);
             return;
@@ -149,7 +246,7 @@ public class LoginActivity extends AppCompatActivity {
             String service;
             String problem = "";
             try {
-                service = lookup(entryValue);
+                service = lookup(root);
             } catch (IOException ex) {
                 service = null;
                 problem = "无法连接入口";
@@ -166,20 +263,13 @@ public class LoginActivity extends AppCompatActivity {
                     return;
                 }
                 serviceUrl = resolved;
-                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                        .remove(ENTRY_KEY)
-                        .putString(SERVICE_KEY, resolved)
-                        .apply();
-                if (openIfSession && hasSession(resolved)) {
-                    openBrowse();
-                    return;
+                SharedPreferences.Editor editor = getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                        .putString(SERVICE_KEY, resolved);
+                if (!isTunnel(root)) {
+                    editor.putString(ENTRY_KEY, root);
                 }
-                if (!openIfSession) {
-                    signInOnBackground(user, pass);
-                    return;
-                }
-                error.setText("");
-                login.setEnabled(true);
+                editor.apply();
+                signInOnBackground(user, pass);
             });
         }).start();
     }
@@ -221,8 +311,8 @@ public class LoginActivity extends AppCompatActivity {
         }
         HttpURLConnection conn = (HttpURLConnection) new URL(entry + "/address").openConnection();
         conn.setInstanceFollowRedirects(false);
-        conn.setConnectTimeout(12000);
-        conn.setReadTimeout(12000);
+        conn.setConnectTimeout(15000);
+        conn.setReadTimeout(15000);
         conn.setRequestMethod("GET");
         int status = conn.getResponseCode();
         if (status != 200) {
@@ -302,7 +392,7 @@ public class LoginActivity extends AppCompatActivity {
     private String signIn(String username, String password) throws Exception {
         HttpURLConnection conn = (HttpURLConnection) new URL(serviceUrl + "/login").openConnection();
         conn.setConnectTimeout(20000);
-        conn.setReadTimeout(20000);
+        conn.setReadTimeout(25000);
         conn.setRequestMethod("POST");
         conn.setDoOutput(true);
         conn.setRequestProperty("Accept", "application/json");

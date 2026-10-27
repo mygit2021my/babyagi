@@ -16,7 +16,15 @@ final class AddressCrypto {
         if (!value.startsWith("g1.")) {
             throw new IllegalArgumentException("blob");
         }
-        byte[] raw = Base64.decode(value.substring(3), Base64.URL_SAFE | Base64.NO_PADDING | Base64.NO_WRAP);
+        String payload = value.substring(3).replace("=", "").replaceAll("\\s", "");
+        int mod = payload.length() % 4;
+        if (mod == 1) {
+            throw new IllegalArgumentException("blob");
+        }
+        if (mod > 0) {
+            payload = payload + "====".substring(0, 4 - mod);
+        }
+        byte[] raw = Base64.decode(payload, Base64.URL_SAFE | Base64.NO_WRAP);
         if (raw.length < 28) {
             throw new IllegalArgumentException("short");
         }
