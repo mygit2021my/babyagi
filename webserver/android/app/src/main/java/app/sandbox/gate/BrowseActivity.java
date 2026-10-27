@@ -62,7 +62,12 @@ public class BrowseActivity extends AppCompatActivity {
                 getOnBackPressedDispatcher().onBackPressed();
             }
         });
-        web.loadUrl(LoginActivity.baseUrl(this) + "/");
+        String page = LoginActivity.baseUrl(this);
+        if (!LoginActivity.isTunnel(page)) {
+            finish();
+            return;
+        }
+        web.loadUrl(page + "/");
     }
 
     @Override

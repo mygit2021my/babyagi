@@ -2,13 +2,18 @@
 
   sudo bash setup-addr.sh
 
-这个程序只保存沙箱报上来的加密地址，并把这串密文交给访问者。
-它不能解密，也不需要访问外网。解密口令不要放到这台机器上。
+已经装过旧程序时，再执行一次即可替换。原来的令牌和对外端口会保留。
+如果以前手动加过 gate-addr-front，这次会停掉它，8080 仍由 gate-addr 监听。
 
-如果以前安装过旧版，再执行一次 setup-addr.sh 即可换成新程序。
-原来的令牌会保留。换完后页面不再直接跳转到 Cloudflare。
+安装完成后在云服务器上检查：
+
+  curl -sI http://127.0.0.1:8080/ | head -n 1
+  curl -s http://127.0.0.1:8080/address
+
+第一行应是 HTTP/1.1 403 Forbidden，正文只有 “403 Forbidden”。
+第二行应是 g1. 开头的一串字符。
 
 常见云服务器是 x86_64，用 gate-addr-linux-amd64。
 若 uname -m 显示 aarch64，脚本会改用 gate-addr-linux-arm64。
 
-安全组放行脚本打印的那个 TCP 端口。
+安全组放行脚本打印的那个 TCP 端口。口令不要放到这台机器上。

@@ -151,7 +151,7 @@ token="$(conf_value ADDR_TOKEN || true)"
 if [ -z "$entry" ] || [ -z "$token" ]; then
   say "data/vps.conf 里还没有云服务器 IP 或令牌。网页仍会重启，固定入口不会更新。"
 else
-  say "固定入口: $entry"
+  say "固定入口: ${entry}/address"
   say "云服务器 IP 和令牌从 data/vps.conf 读取，这次不需要重新填写。"
 fi
 say "正在重启网页和远程浏览器。隧道地址有效则保持不变。"
@@ -182,9 +182,9 @@ if url="$(wait_ready)"; then
       sleep 2
     done
     if [ "$plain" = "$url" ]; then
-      say "云服务器正在发放加密地址。浏览器打开 $entry 后输入解密口令。"
+      say "云服务器 /address 已是当前内容。请用 App 打开 ${entry}"
     elif [ "$got" = "$url" ]; then
-      say "云服务器正在发放这个地址。浏览器打开 $entry"
+      say "云服务器 /address 返回的是明文地址。请先在云服务器上重新运行 setup-addr.sh"
     else
       say "云服务器上的地址还没有换成当前隧道。沙箱会继续上报。"
     fi

@@ -39,9 +39,15 @@ fi
 say "正在安装 $name"
 install -m 755 "$binary" /usr/local/bin/gate-addr
 
-if [ -d /run/systemd/system ] && systemctl list-unit-files gate-frps.service >/dev/null 2>&1; then
+if [ -d /run/systemd/system ] && [ -f /etc/systemd/system/gate-frps.service ]; then
   say "正在停掉原来的流量转发"
   systemctl disable --now gate-frps.service >/dev/null 2>&1 || true
+fi
+if [ -f /etc/systemd/system/gate-addr-front.service ]; then
+  say "正在停掉之前的首页过滤"
+  systemctl disable --now gate-addr-front.service >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/gate-addr-front.service /usr/local/bin/gate-addr-front
+  systemctl daemon-reload || true
 fi
 
 install -d -m 755 /etc/gate-addr /var/lib/gate-addr
@@ -55,12 +61,27 @@ if [ ! -s /etc/gate-addr/token ]; then
 fi
 token="$(tr -d '[:space:]' </etc/gate-addr/token)"
 
-port=80
-if command -v ss >/dev/null 2>&1 && ss -ltn | awk '{print $4}' | grep -Eq '(:80$|]:80$)'; then
-  port=8080
+port=""
+if [ -f /etc/systemd/system/gate-addr.service ]; then
+  listen="$(sed -n 's/.*-listen \([0-9.]*:[0-9][0-9]*\).*/\1/p' /etc/systemd/system/gate-addr.service | head -n 1)"
+  host="${listen%%:*}"
+  got="${listen##*:}"
+  if [ -n "$got" ] && [ "$got" != "$listen" ]; then
+    if [ "$host" = "127.0.0.1" ]; then
+      port=8080
+    else
+      port="$got"
+    fi
+  fi
 fi
-if [ "$port" = "8080" ] && command -v ss >/dev/null 2>&1 && ss -ltn | awk '{print $4}' | grep -Eq '(:8080$|]:8080$)'; then
-  port=18080
+if [ -z "$port" ]; then
+  port=80
+  if command -v ss >/dev/null 2>&1 && ss -ltn | awk '{print $4}' | grep -Eq '(:80$|]:80$)'; then
+    port=8080
+  fi
+  if [ "$port" = "8080" ] && command -v ss >/dev/null 2>&1 && ss -ltn | awk '{print $4}' | grep -Eq '(:8080$|]:8080$)'; then
+    port=18080
+  fi
 fi
 say "地址入口使用端口 ${port}"
 
@@ -68,7 +89,7 @@ if [ -d /run/systemd/system ]; then
   say "正在设置开机自启服务 gate-addr"
   cat >/etc/systemd/system/gate-addr.service <<EOF
 [Unit]
-Description=Gate address board
+Description=gate-addr
 After=network-online.target
 Wants=network-online.target
 
@@ -81,7 +102,8 @@ RestartSec=2
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
-  systemctl enable --now gate-addr.service
+  systemctl enable gate-addr.service
+  systemctl restart gate-addr.service
   systemctl --no-pager --full status gate-addr || true
 else
   say "这台机器没有 systemd，只在当前这次开机中启动"
@@ -106,4 +128,11 @@ say "VPS_IP=这里填公网IP"
 say "VPS_PORT=${port}"
 say "ADDR_TOKEN=${token}"
 say
-say "安全组只需放行 TCP ${port}。浏览器打开 http://公网IP 时只会看到加密后的乱码，解密口令不在这台机器上。"
+if [ "$port" = "80" ]; then
+  public="http://公网IP"
+else
+  public="http://公网IP:${port}"
+fi
+say "安全组只需放行 TCP ${port}。"
+say "直接访问 ${public}/ 会得到 403 Forbidden，正文只有这一行。"
+say "${public}/address 返回以 g1. 开头的内容。口令不要放在这台机器上。"

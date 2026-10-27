@@ -90,10 +90,9 @@ echo "正在把 Cloudflare 地址告知 $entry"
 for _ in $(seq 1 45); do
   got="$(curl -4 -fsS --connect-timeout 5 --max-time 8 "$board" 2>/dev/null || true)"
   got="$(printf '%s' "$got" | tr -d '[:space:]')"
-  if [[ "$got" =~ ^https://[a-z0-9-]+\.trycloudflare\.com$ ]]; then
-    echo "固定入口: $entry"
-    echo "当前 Cloudflare 地址: $got"
-    echo "浏览器打开固定入口后会转到 Cloudflare。后续流量不经过云服务器。"
+  if [[ "$got" =~ ^g1\.[A-Za-z0-9_-]+$ ]] || [[ "$got" =~ ^https://[a-z0-9-]+\.trycloudflare\.com$ ]]; then
+    echo "固定入口: ${entry}/address"
+    echo "App 从这里读取内容，解开后再访问沙箱上的网页。网页流量不经过云服务器。"
     exit 0
   fi
   sleep 2

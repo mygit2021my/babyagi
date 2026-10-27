@@ -47,13 +47,21 @@ public class LoginActivity extends AppCompatActivity {
         return value != null && TUNNEL.matcher(value).matches();
     }
 
+    static String entryRoot(String value) {
+        String entry = normalize(value);
+        if (entry.endsWith("/address")) {
+            entry = normalize(entry.substring(0, entry.length() - "/address".length()));
+        }
+        return entry;
+    }
+
     static String entryUrl(Context context) {
         SharedPreferences prefs = context.getSharedPreferences(PREFS, MODE_PRIVATE);
-        String saved = normalize(prefs.getString(ENTRY_KEY, ""));
+        String saved = entryRoot(prefs.getString(ENTRY_KEY, ""));
         if (!saved.isEmpty()) {
             return saved;
         }
-        return normalize(context.getString(R.string.server_base_url));
+        return entryRoot(context.getString(R.string.server_base_url));
     }
 
     static String baseUrl(Context context) {
@@ -107,24 +115,27 @@ public class LoginActivity extends AppCompatActivity {
         String pass = password.getText().toString();
         new Thread(() -> {
             String service;
+            String problem = "";
             try {
                 service = lookup(entryValue);
             } catch (IOException ex) {
                 service = null;
+                problem = "无法连接入口";
             }
             String resolved = service;
+            String failure = problem;
             runOnUiThread(() -> {
                 if (isDestroyed()) {
                     return;
                 }
                 if (!isTunnel(resolved)) {
-                    error.setText("入口没有返回 Cloudflare 地址");
+                    error.setText(failure.isEmpty() ? "没有拿到访问地址" : failure);
                     login.setEnabled(true);
                     return;
                 }
                 serviceUrl = resolved;
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                        .putString(ENTRY_KEY, normalize(entry.getText().toString()))
+                        .putString(ENTRY_KEY, entryRoot(entry.getText().toString()))
                         .putString(SERVICE_KEY, resolved)
                         .apply();
                 if (openIfSession && hasSession(resolved)) {
@@ -164,7 +175,7 @@ public class LoginActivity extends AppCompatActivity {
     }
 
     private String lookup(String entryValue) throws IOException {
-        String entry = normalize(entryValue);
+        String entry = entryRoot(entryValue);
         if (isTunnel(entry)) {
             return entry;
         }
@@ -180,7 +191,7 @@ public class LoginActivity extends AppCompatActivity {
         if (status != 200) {
             return "";
         }
-        String body = normalize(readBody(conn));
+        String body = readBody(conn).trim();
         if (isTunnel(body)) {
             return body;
         }
