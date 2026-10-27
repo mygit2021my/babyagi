@@ -158,9 +158,14 @@ public class LoginActivity extends AppCompatActivity {
         new Thread(() -> {
             try {
                 String token = signIn(user, pass);
-                storeSession(token, () -> {
-                    error.setText("登录状态没有保存");
-                    login.setEnabled(true);
+                runOnUiThread(() -> {
+                    if (isDestroyed()) {
+                        return;
+                    }
+                    storeSession(token, () -> {
+                        error.setText("登录状态没有保存");
+                        login.setEnabled(true);
+                    });
                 });
             } catch (Exception ex) {
                 runOnUiThread(() -> {
